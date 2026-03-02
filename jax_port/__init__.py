@@ -8,6 +8,7 @@ from .neural_network import (
 from .interp2 import interp2_regular, interp2_bilinear, interp2_nearest
 from .fmincon import fmincon, FminconResult
 from .my_auxv_cal import my_auxv_cal, AuxVParams
+from .mymain_se import mymain_se, GridCfg, LifeCfg, FixedParams
 
 __all__ = [
     "tauchen_hussey",
@@ -22,4 +23,8 @@ __all__ = [
     "FminconResult",
     "my_auxv_cal",
     "AuxVParams",
+    "mymain_se",
+    "GridCfg",
+    "LifeCfg",
+    "FixedParams",
 ]

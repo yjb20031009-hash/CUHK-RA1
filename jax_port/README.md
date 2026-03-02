@@ -7,6 +7,7 @@
 - MATLAB `interp2`（规则网格常用形式）→ `interp2.py`
 - MATLAB `fmincon`（约束优化接口近似）→ `fmincon.py`
 - MATLAB `my_auxV_cal.m`（底层目标函数）→ `my_auxv_cal.py`
+- MATLAB `mymain_se.m`（policy function 主求解）→ `mymain_se.py`（离散搜索近似）
 
 > 说明：像 `my_solution.m` / `my_estimation_*.m` 这类大规模估计脚本依赖大量全局变量和外部函数，建议下一步按模块（状态转移、价值函数、目标函数）继续拆分转写。
 

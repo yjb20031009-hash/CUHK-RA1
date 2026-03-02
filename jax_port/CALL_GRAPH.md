@@ -6,6 +6,7 @@
 - `Neural_Network.m` → `jax_port/neural_network.py`
 - MATLAB `interp2`（规则网格常用调用）→ `jax_port/interp2.py`
 - MATLAB `fmincon`（约束优化调用）→ `jax_port/fmincon.py`
+- `jax_port/mymain_se.py` → MATLAB 主求解流程的离散搜索近似
 - `jax_port/__init__.py` 作为统一导出入口
 
 ---
@@ -68,8 +69,9 @@ predict_mlp
 
 ```text
 interp2_regular
-├─ _find_cell_indices (linear)
-└─ nearest / linear 分支
+├─ interp2_bilinear
+├─ interp2_nearest
+└─ bounds handling (nan/clip)
 ```
 
 ### 3.4 `jax_port/fmincon.py`
@@ -98,4 +100,14 @@ __init__.py
 ├─ interp2_regular
 ├─ fmincon / FminconResult
 └─ my_auxv_cal / AuxVParams
+```
+
+
+### 3.7 `jax_port/mymain_se.py`
+
+```text
+mymain_se
+├─ tauchen_hussey
+├─ my_auxv_cal (via AuxVParams + model_fn)
+└─ discrete candidate search (替代 fmincon)
 ```
