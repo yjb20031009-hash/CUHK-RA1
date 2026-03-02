@@ -7,6 +7,7 @@
 - MATLAB `interp2`（规则网格常用调用）→ `jax_port/interp2.py`
 - MATLAB `fmincon`（约束优化调用）→ `jax_port/fmincon.py`
 - `jax_port/mymain_se.py` → MATLAB 主求解流程的离散搜索近似
+- `jax_port/my_estimation_prepost.py` → MATLAB 估计主流程（pre/post）
 - `jax_port/__init__.py` 作为统一导出入口
 
 ---
@@ -110,4 +111,15 @@ mymain_se
 ├─ tauchen_hussey
 ├─ my_auxv_cal (via AuxVParams + model_fn)
 └─ discrete candidate search (替代 fmincon)
+```
+
+
+### 3.8 `jax_port/my_estimation_prepost.py`
+
+```text
+my_estimation_prepost
+├─ tauchen_hussey (via build_return_process)
+├─ mymain_se (pre/post policy)
+├─ interp2_regular (policy lookup)
+└─ OLS + shock-probability averaging
 ```
