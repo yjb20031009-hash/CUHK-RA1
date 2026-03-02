@@ -1,14 +1,8 @@
-"""MATLAB-like interp2 helpers in JAX.
-
-Implements regular-grid 2D interpolation for the common call pattern:
-    interp2(x, y, V, xq, yq, method)
-where x corresponds to columns of V and y to rows of V.
-"""
+"""MATLAB-like interp2 helpers in JAX (regular grid)."""
 
 from __future__ import annotations
 
 import jax.numpy as jnp
-
 
 Array = jnp.ndarray
 
@@ -17,18 +11,80 @@ def _as_array(x) -> Array:
     return jnp.asarray(x)
 
 
-def _find_cell_indices(grid: Array, q: Array) -> tuple[Array, Array, Array]:
-    """Return left/right indices and normalized local coordinate in [0,1]."""
-    idx_right = jnp.searchsorted(grid, q, side="right")
-    idx_right = jnp.clip(idx_right, 1, grid.size - 1)
-    idx_left = idx_right - 1
+def _clamp(q: Array, grid: Array) -> Array:
+    return jnp.clip(q, grid[0], grid[-1])
 
-    g0 = grid[idx_left]
-    g1 = grid[idx_right]
-    denom = jnp.maximum(g1 - g0, 1e-15)
-    t = (q - g0) / denom
-    t = jnp.clip(t, 0.0, 1.0)
-    return idx_left, idx_right, t
+
+def _searchsorted_clipped(grid: Array, q: Array) -> Array:
+    """Return i such that grid[i] <= q < grid[i+1], clipped to valid range."""
+    i = jnp.searchsorted(grid, q, side="right") - 1
+    return jnp.clip(i, 0, grid.shape[0] - 2)
+
+
+def _validate_inputs(x: Array, y: Array, v: Array) -> None:
+    if x.ndim != 1 or y.ndim != 1:
+        raise ValueError("x and y must be 1D arrays")
+    if v.ndim != 2 or v.shape != (y.size, x.size):
+        raise ValueError("v must have shape (len(y), len(x))")
+
+
+def interp2_bilinear(x_grid, y_grid, v, xq, yq) -> Array:
+    """Bilinear interpolation on regular grid (with clamped query points)."""
+    x_grid = _as_array(x_grid)
+    y_grid = _as_array(y_grid)
+    v = _as_array(v)
+    xq = _as_array(xq)
+    yq = _as_array(yq)
+    xq, yq = jnp.broadcast_arrays(xq, yq)
+
+    _validate_inputs(x_grid, y_grid, v)
+
+    xq = _clamp(xq, x_grid)
+    yq = _clamp(yq, y_grid)
+
+    ix = _searchsorted_clipped(x_grid, xq)
+    iy = _searchsorted_clipped(y_grid, yq)
+
+    x0 = x_grid[ix]
+    x1 = x_grid[ix + 1]
+    y0 = y_grid[iy]
+    y1 = y_grid[iy + 1]
+
+    tx = jnp.where(x1 > x0, (xq - x0) / (x1 - x0), 0.0)
+    ty = jnp.where(y1 > y0, (yq - y0) / (y1 - y0), 0.0)
+
+    v00 = v[iy, ix]
+    v10 = v[iy, ix + 1]
+    v01 = v[iy + 1, ix]
+    v11 = v[iy + 1, ix + 1]
+
+    v0 = v00 * (1.0 - tx) + v10 * tx
+    v1 = v01 * (1.0 - tx) + v11 * tx
+    return v0 * (1.0 - ty) + v1 * ty
+
+
+def interp2_nearest(x_grid, y_grid, v, xq, yq) -> Array:
+    """Nearest-neighbor interpolation on regular grid (with clamped query points)."""
+    x_grid = _as_array(x_grid)
+    y_grid = _as_array(y_grid)
+    v = _as_array(v)
+    xq = _as_array(xq)
+    yq = _as_array(yq)
+    xq, yq = jnp.broadcast_arrays(xq, yq)
+
+    _validate_inputs(x_grid, y_grid, v)
+
+    xq = _clamp(xq, x_grid)
+    yq = _clamp(yq, y_grid)
+
+    ix_r = jnp.clip(jnp.searchsorted(x_grid, xq, side="left"), 0, x_grid.shape[0] - 1)
+    iy_r = jnp.clip(jnp.searchsorted(y_grid, yq, side="left"), 0, y_grid.shape[0] - 1)
+    ix_l = jnp.maximum(ix_r - 1, 0)
+    iy_l = jnp.maximum(iy_r - 1, 0)
+
+    ix = jnp.where(jnp.abs(xq - x_grid[ix_l]) <= jnp.abs(xq - x_grid[ix_r]), ix_l, ix_r)
+    iy = jnp.where(jnp.abs(yq - y_grid[iy_l]) <= jnp.abs(yq - y_grid[iy_r]), iy_l, iy_r)
+    return v[iy, ix]
 
 
 def interp2_regular(
@@ -40,61 +96,34 @@ def interp2_regular(
     method: str = "linear",
     *,
     extrapval=jnp.nan,
+    bounds: str = "nan",
 ) -> Array:
-    """Regular-grid interpolation similar to MATLAB ``interp2``.
+    """MATLAB-like wrapper around regular-grid interpolation.
 
-    Args:
-        x: 1D increasing grid for columns of ``v`` (size nx)
-        y: 1D increasing grid for rows of ``v`` (size ny)
-        v: 2D values, shape (ny, nx)
-        xq, yq: query locations (broadcastable same shape)
-        method: "linear" or "nearest"
-        extrapval: fill value for out-of-domain points
+    bounds:
+      - "nan": out-of-bound values replaced by extrapval
+      - "clip": out-of-bound values are clamped to grid boundary before interpolation
     """
     x = _as_array(x)
     y = _as_array(y)
     v = _as_array(v)
     xq = _as_array(xq)
     yq = _as_array(yq)
-
-    if x.ndim != 1 or y.ndim != 1:
-        raise ValueError("x and y must be 1D arrays")
-    if v.ndim != 2 or v.shape != (y.size, x.size):
-        raise ValueError("v must have shape (len(y), len(x))")
-
     xq, yq = jnp.broadcast_arrays(xq, yq)
+
+    _validate_inputs(x, y, v)
 
     outside = (xq < x[0]) | (xq > x[-1]) | (yq < y[0]) | (yq > y[-1])
 
     if method.lower() == "nearest":
-        ix_r = jnp.clip(jnp.searchsorted(x, xq, side="left"), 0, x.size - 1)
-        iy_r = jnp.clip(jnp.searchsorted(y, yq, side="left"), 0, y.size - 1)
-        ix_l = jnp.maximum(ix_r - 1, 0)
-        iy_l = jnp.maximum(iy_r - 1, 0)
-
-        choose_left_x = jnp.abs(xq - x[ix_l]) <= jnp.abs(xq - x[ix_r])
-        choose_left_y = jnp.abs(yq - y[iy_l]) <= jnp.abs(yq - y[iy_r])
-        ix = jnp.where(choose_left_x, ix_l, ix_r)
-        iy = jnp.where(choose_left_y, iy_l, iy_r)
-
-        out = v[iy, ix]
-        return jnp.where(outside, extrapval, out)
-
-    if method.lower() != "linear":
+        out = interp2_nearest(x, y, v, xq, yq)
+    elif method.lower() == "linear":
+        out = interp2_bilinear(x, y, v, xq, yq)
+    else:
         raise ValueError("method must be 'linear' or 'nearest'")
 
-    ix0, ix1, tx = _find_cell_indices(x, xq)
-    iy0, iy1, ty = _find_cell_indices(y, yq)
-
-    v00 = v[iy0, ix0]
-    v10 = v[iy0, ix1]
-    v01 = v[iy1, ix0]
-    v11 = v[iy1, ix1]
-
-    out = (
-        (1.0 - tx) * (1.0 - ty) * v00
-        + tx * (1.0 - ty) * v10
-        + (1.0 - tx) * ty * v01
-        + tx * ty * v11
-    )
-    return jnp.where(outside, extrapval, out)
+    if bounds.lower() == "clip":
+        return out
+    if bounds.lower() == "nan":
+        return jnp.where(outside, extrapval, out)
+    raise ValueError("bounds must be 'nan' or 'clip'")

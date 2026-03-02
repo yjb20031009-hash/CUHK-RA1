@@ -5,8 +5,9 @@ from .neural_network import (
     train_mlp,
     predict_mlp,
 )
-from .interp2 import interp2_regular
+from .interp2 import interp2_regular, interp2_bilinear, interp2_nearest
 from .fmincon import fmincon, FminconResult
+from .my_auxv_cal import my_auxv_cal, AuxVParams
 
 __all__ = [
     "tauchen_hussey",
@@ -15,6 +16,10 @@ __all__ = [
     "train_mlp",
     "predict_mlp",
     "interp2_regular",
+    "interp2_bilinear",
+    "interp2_nearest",
     "fmincon",
     "FminconResult",
+    "my_auxv_cal",
+    "AuxVParams",
 ]

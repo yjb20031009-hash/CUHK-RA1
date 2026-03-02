@@ -81,12 +81,21 @@ fmincon
 └─ scipy.optimize.minimize (SLSQP / trust-constr)
 ```
 
-### 3.5 `jax_port/__init__.py` 导出关系
+### 3.5 `jax_port/my_auxv_cal.py`
+
+```text
+my_auxv_cal
+├─ jax.lax.cond (四分支现金流)
+└─ model_fn(housing_nn, cash_nn)
+```
+
+### 3.6 `jax_port/__init__.py` 导出关系
 
 ```text
 __init__.py
 ├─ tauchen_hussey
 ├─ build_training_data / init_mlp / train_mlp / predict_mlp
 ├─ interp2_regular
-└─ fmincon / FminconResult
+├─ fmincon / FminconResult
+└─ my_auxv_cal / AuxVParams
 ```
