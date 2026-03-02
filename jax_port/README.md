@@ -1,9 +1,11 @@
 # MATLAB 到 JAX 转写
 
-本目录提供了对仓库中关键 MATLAB 代码的 JAX 实现：
+本目录提供了对仓库中关键 MATLAB 代码/内置调用的 JAX(Python) 实现：
 
 - `tauchenHussey.m` → `tauchen_hussey.py`
 - `Neural_Network.m` → `neural_network.py`
+- MATLAB `interp2`（规则网格常用形式）→ `interp2.py`
+- MATLAB `fmincon`（约束优化接口近似）→ `fmincon.py`
 
 > 说明：像 `my_solution.m` / `my_estimation_*.m` 这类大规模估计脚本依赖大量全局变量和外部函数，建议下一步按模块（状态转移、价值函数、目标函数）继续拆分转写。
 
@@ -12,20 +14,26 @@
 ```python
 import jax
 import jax.numpy as jnp
-from jax_port import tauchen_hussey, build_training_data, init_mlp, train_mlp, predict_mlp
+from jax_port import (
+    tauchen_hussey,
+    build_training_data,
+    init_mlp,
+    train_mlp,
+    predict_mlp,
+    interp2_regular,
+    fmincon,
+)
 
 # Tauchen-Hussey
 z, zprob = tauchen_hussey(n=7, mu=0.0, rho=0.9, sigma=0.2, base_sigma=0.2)
 
-# Neural network
-gcash = jnp.linspace(0.0, 1.0, 10)
-ghouse = jnp.linspace(0.0, 1.0, 8)
-tn = 4
-shape = (gcash.size, ghouse.size, tn)
-zeros = jnp.zeros(shape)
+# interp2 (regular grid)
+x = jnp.array([0.0, 1.0, 2.0])
+y = jnp.array([0.0, 1.0])
+V = jnp.array([[0.0, 1.0, 2.0], [10.0, 11.0, 12.0]])
+val = interp2_regular(x, y, V, xq=0.5, yq=0.5, method="linear")
 
-x, y = build_training_data(gcash, ghouse, tn, zeros, zeros, zeros, zeros, zeros, zeros)
-params, predict_fn = init_mlp(jax.random.key(0))
-trained = train_mlp(x, y, params, predict_fn, epochs=5)
-yhat = predict_mlp(x, trained, predict_fn)
+# fmincon-like optimization
+fun = lambda u: (u[0]-1.0) ** 2 + (u[1]+2.0) ** 2
+res = fmincon(fun, x0=[0.0, 0.0], lb=[-1.0, -3.0], ub=[2.0, 1.0])
 ```

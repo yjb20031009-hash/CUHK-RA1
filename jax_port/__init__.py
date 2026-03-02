@@ -5,6 +5,8 @@ from .neural_network import (
     train_mlp,
     predict_mlp,
 )
+from .interp2 import interp2_regular
+from .fmincon import fmincon, FminconResult
 
 __all__ = [
     "tauchen_hussey",
@@ -12,4 +14,7 @@ __all__ = [
     "init_mlp",
     "train_mlp",
     "predict_mlp",
+    "interp2_regular",
+    "fmincon",
+    "FminconResult",
 ]
