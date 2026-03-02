@@ -14,6 +14,7 @@ from .my_estimation_prepostdid1 import my_estimation_prepostdid1
 from .my_estimation_prepostdid1_high import my_estimation_prepostdid1_high
 from .my_estimation_prepostdid1_low import my_estimation_prepostdid1_low
 from .cmaes2_jax import cmaes2_minimize, CMAESOptions, CMAESResult
+from .my_solution import run_my_solution, MySolutionResult
 
 __all__ = [
     "tauchen_hussey",
@@ -40,4 +41,6 @@ __all__ = [
     "cmaes2_minimize",
     "CMAESOptions",
     "CMAESResult",
+    "run_my_solution",
+    "MySolutionResult",
 ]

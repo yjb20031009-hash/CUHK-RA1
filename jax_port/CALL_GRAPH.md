@@ -12,6 +12,7 @@
 - `jax_port/my_estimation_prepostdid1.py` → DID1 全样本封装
 - `jax_port/my_estimation_prepostdid1_high.py` → DID1 高金融素养封装
 - `jax_port/my_estimation_prepostdid1_low.py` → DID1 低金融素养封装
+- `jax_port/my_solution.py` → 顶层优化流程调度
 - `jax_port/__init__.py` 作为统一导出入口
 
 ---
@@ -148,4 +149,13 @@ cmaes2_minimize
 ├─ ask: Gaussian sampling with B,D,C
 ├─ tell: rank-mu covariance update
 └─ step-size control (CSA)
+```
+
+
+### 3.11 `jax_port/my_solution.py`
+
+```text
+run_my_solution
+├─ cmaes2_minimize
+└─ my_estimation_prepostdid1(_high/_low)
 ```
