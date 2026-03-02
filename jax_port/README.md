@@ -1,6 +1,23 @@
 # MATLAB 到 JAX 转写
-
 本目录提供了对仓库中关键 MATLAB 代码/内置调用的 JAX(Python) 实现：
+原代码架构：
+First,
+最外层My solution： 
+1.my_estimation_prepostdid1_high
+2.cmaes2('my_estimation_prepostdid1', ....
+3.cmaes2( 'my_estimation_prepostdid1_low' ,....;
+4.cmaes2('my_estimation_prepostdid1_high',....;
+
+中间cmaes2 -> 一个封装好的直接使用的函数
+my_estimation_prepostdid1（这3个区别不大） -> 最重要的外层函数 —>调用的mymain_se作Policy function， 还有tauchenHussey函数
+mymain_se -> policy function ->输入一组可变的参数，通过grid search和fmincon结合的方法，求解policy function（打格子的方法是先取ln，然后对ln(cash)均匀等分，再求exp(lncash)转换回cash） ->要调用my_auxV_cal，还要使用内置函数fmicon。my_long_loop说是写了要用，但是没看见在哪
+
+最底层-my_auxV_cal 目标函数
+	tauchenHussey 离散函数
+	Neutral network 神经网络训练+画图，没搞懂干嘛用的，主函数没有调用
+    重写了matlab里的内置函数intercp2以及fmicon，因为Jax没有
+
+
 
 - `tauchenHussey.m` → `tauchen_hussey.py`
 - `Neural_Network.m` → `neural_network.py`
@@ -14,7 +31,7 @@
 - `my_estimation_prepostdid1_high.m` → `my_estimation_prepostdid1_high.py`
 - `my_estimation_prepostdid1_low.m` → `my_estimation_prepostdid1_low.py`
 
-> 说明：像 `my_solution.m` / `my_estimation_*.m` 这类大规模估计脚本依赖大量全局变量和外部函数，建议下一步按模块（状态转移、价值函数、目标函数）继续拆分转写。
+
 
 ## 快速示例
 
