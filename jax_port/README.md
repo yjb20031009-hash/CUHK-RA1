@@ -1,8 +1,8 @@
 # MATLAB 到 JAX 转写
 本目录提供了对仓库中关键 MATLAB 代码/内置调用的 JAX(Python) 实现：
 原代码架构：
-First,
-最外层My solution： 
+First:
+最外层是My solution： 
 1.my_estimation_prepostdid1_high
 2.cmaes2('my_estimation_prepostdid1', ....
 3.cmaes2( 'my_estimation_prepostdid1_low' ,....;
@@ -10,7 +10,7 @@ First,
 
 中间cmaes2 -> 一个封装好的直接使用的函数
 my_estimation_prepostdid1（这3个区别不大） -> 最重要的外层函数 —>调用的mymain_se作Policy function， 还有tauchenHussey函数
-mymain_se -> policy function ->输入一组可变的参数，通过grid search和fmincon结合的方法，求解policy function（打格子的方法是先取ln，然后对ln(cash)均匀等分，再求exp(lncash)转换回cash） ->要调用my_auxV_cal，还要使用内置函数fmicon。my_long_loop说是写了要用，但是没看见在哪
+mymain_se -> policy function ->输入一组可变的参数，通过grid search和fmincon结合的方法，求解policy function（打格子的方法是先取ln，然后对ln(cash)均匀等分，再求exp(lncash)转换回cash） ->要调用my_auxV_cal，还要使用内置函数fmicon。my_long_loop说是写了要用，但是原代码没看见在哪
 
 最底层-my_auxV_cal 目标函数
 	tauchenHussey 离散函数
