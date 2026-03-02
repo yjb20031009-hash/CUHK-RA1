@@ -6,6 +6,7 @@
 - `Neural_Network.m` → `jax_port/neural_network.py`
 - MATLAB `interp2`（规则网格常用调用）→ `jax_port/interp2.py`
 - MATLAB `fmincon`（约束优化调用）→ `jax_port/fmincon.py`
+- MATLAB `cmaes2.m` → `jax_port/cmaes2_jax.py`
 - `jax_port/mymain_se.py` → MATLAB 主求解流程的离散搜索近似
 - `jax_port/my_estimation_prepost.py` → MATLAB 估计主流程（pre/post）
 - `jax_port/my_estimation_prepostdid1.py` → DID1 全样本封装
@@ -137,4 +138,14 @@ my_estimation_prepostdid1 / _high / _low
       ├─ mymain_se
       ├─ interp2_regular
       └─ OLS + shock averaging
+```
+
+
+### 3.10 `jax_port/cmaes2_jax.py`
+
+```text
+cmaes2_minimize
+├─ ask: Gaussian sampling with B,D,C
+├─ tell: rank-mu covariance update
+└─ step-size control (CSA)
 ```

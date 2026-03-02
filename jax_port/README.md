@@ -6,6 +6,7 @@
 - `Neural_Network.m` → `neural_network.py`
 - MATLAB `interp2`（规则网格常用形式）→ `interp2.py`
 - MATLAB `fmincon`（约束优化接口近似）→ `fmincon.py`
+- MATLAB `cmaes2.m`（核心 CMA-ES）→ `cmaes2_jax.py`
 - MATLAB `my_auxV_cal.m`（底层目标函数）→ `my_auxv_cal.py`
 - MATLAB `mymain_se.m`（policy function 主求解）→ `mymain_se.py`（离散搜索近似）
 - MATLAB `my_estimation_prepost.m` → `my_estimation_prepost.py`（工程化结构转写）

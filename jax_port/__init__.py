@@ -13,6 +13,7 @@ from .my_estimation_prepost import my_estimation_prepost, EstimationConfig
 from .my_estimation_prepostdid1 import my_estimation_prepostdid1
 from .my_estimation_prepostdid1_high import my_estimation_prepostdid1_high
 from .my_estimation_prepostdid1_low import my_estimation_prepostdid1_low
+from .cmaes2_jax import cmaes2_minimize, CMAESOptions, CMAESResult
 
 __all__ = [
     "tauchen_hussey",
@@ -36,4 +37,7 @@ __all__ = [
     "my_estimation_prepostdid1",
     "my_estimation_prepostdid1_high",
     "my_estimation_prepostdid1_low",
+    "cmaes2_minimize",
+    "CMAESOptions",
+    "CMAESResult",
 ]
