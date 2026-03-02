@@ -10,11 +10,9 @@ from .fmincon import fmincon, FminconResult
 from .my_auxv_cal import my_auxv_cal, AuxVParams
 from .mymain_se import mymain_se, GridCfg, LifeCfg, FixedParams
 from .my_estimation_prepost import my_estimation_prepost, EstimationConfig
-from .my_estimation_prepostdid1 import (
-    my_estimation_prepostdid1,
-    my_estimation_prepostdid1_high,
-    my_estimation_prepostdid1_low,
-)
+from .my_estimation_prepostdid1 import my_estimation_prepostdid1
+from .my_estimation_prepostdid1_high import my_estimation_prepostdid1_high
+from .my_estimation_prepostdid1_low import my_estimation_prepostdid1_low
 
 __all__ = [
     "tauchen_hussey",

@@ -8,7 +8,9 @@
 - MATLAB `fmincon`（约束优化调用）→ `jax_port/fmincon.py`
 - `jax_port/mymain_se.py` → MATLAB 主求解流程的离散搜索近似
 - `jax_port/my_estimation_prepost.py` → MATLAB 估计主流程（pre/post）
-- `jax_port/my_estimation_prepostdid1.py` → DID1 full/high/low 估计封装
+- `jax_port/my_estimation_prepostdid1.py` → DID1 全样本封装
+- `jax_port/my_estimation_prepostdid1_high.py` → DID1 高金融素养封装
+- `jax_port/my_estimation_prepostdid1_low.py` → DID1 低金融素养封装
 - `jax_port/__init__.py` 作为统一导出入口
 
 ---
@@ -126,12 +128,13 @@ my_estimation_prepost
 ```
 
 
-### 3.9 `jax_port/my_estimation_prepostdid1.py`
+### 3.9 `jax_port/my_estimation_prepostdid1*.py`
 
 ```text
-my_estimation_prepostdid1(_high/_low)
-└─ my_estimation_prepost
-   ├─ mymain_se
-   ├─ interp2_regular
-   └─ OLS + shock averaging
+my_estimation_prepostdid1 / _high / _low
+└─ _did1_common.run_variant
+   └─ my_estimation_prepost
+      ├─ mymain_se
+      ├─ interp2_regular
+      └─ OLS + shock averaging
 ```

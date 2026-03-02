@@ -9,7 +9,9 @@
 - MATLAB `my_auxV_cal.m`（底层目标函数）→ `my_auxv_cal.py`
 - MATLAB `mymain_se.m`（policy function 主求解）→ `mymain_se.py`（离散搜索近似）
 - MATLAB `my_estimation_prepost.m` → `my_estimation_prepost.py`（工程化结构转写）
-- MATLAB `my_estimation_prepostdid1*.m` → `my_estimation_prepostdid1.py`（full/high/low 三个封装）
+- MATLAB `my_estimation_prepostdid1.m` → `my_estimation_prepostdid1.py`
+- `my_estimation_prepostdid1_high.m` → `my_estimation_prepostdid1_high.py`
+- `my_estimation_prepostdid1_low.m` → `my_estimation_prepostdid1_low.py`
 
 > 说明：像 `my_solution.m` / `my_estimation_*.m` 这类大规模估计脚本依赖大量全局变量和外部函数，建议下一步按模块（状态转移、价值函数、目标函数）继续拆分转写。
 
