@@ -129,7 +129,8 @@ def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray
 
     def model_fn(housing_nn: jnp.ndarray, cash_nn: jnp.ndarray) -> jnp.ndarray:
         # 注意插值轴：x=ghouse, y=gcash, V shape=(len(y), len(x))
-        return interp2_regular(ghouse, gcash, v_next.T, housing_nn, cash_nn, method="linear", bounds="clip")
+        # v_next 在本实现中已是 (ncash, nh) = (len(gcash), len(ghouse))，不应再转置。
+        return interp2_regular(ghouse, gcash, v_next, housing_nn, cash_nn, method="linear", bounds="clip")
 
     return model_fn
 
