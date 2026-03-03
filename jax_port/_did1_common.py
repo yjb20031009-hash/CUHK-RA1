@@ -50,9 +50,14 @@ def _with_filtered_sample(sample_path: str, fl_filter: int | None) -> str:
         ms = np.asarray(mat["mySample"])
         if ms.ndim == 2 and ms.shape[1] >= 9:
             mat["mySample"] = ms[ms[:, 8] == fl_filter]
+
+    # scipy.io.savemat 会忽略以下划线开头的键（如 __header__/__version__/__globals__）并给出告警。
+    # 这里先过滤掉这些元键，避免运行时反复出现 MatWriteWarning。
+    mat_to_save = {k: v for k, v in mat.items() if not k.startswith("__")}
+
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mat")
     tmp.close()
-    savemat(tmp.name, mat)
+    savemat(tmp.name, mat_to_save)
     return tmp.name
 
 
