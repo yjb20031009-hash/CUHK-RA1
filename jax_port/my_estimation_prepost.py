@@ -20,7 +20,7 @@ import numpy as np
 from scipy.io import loadmat, savemat
 
 from .interp2 import interp2_regular
-from .mymain_se import mymain_se
+from .mymain_se import FixedParams, GridCfg, mymain_se
 from .tauchen_hussey import tauchen_hussey
 
 
@@ -300,13 +300,57 @@ def my_estimation_prepost(
 
     # === MATLAB section: 求/载入 policy function ===
     # 对应 PFunction_prepostdid1_pre.mat / PFunction_prepostdid1_post.mat 逻辑
+    gcfg_for_solver = GridCfg(n=cfg.n_shock_1d, ncash=cfg.ncash, nh=cfg.nh)
+    fp_for_solver = FixedParams(
+        adjcost=cfg.adjcost,
+        maxhouse=cfg.maxhouse,
+        minhouse=cfg.minhouse,
+        maxcash=cfg.maxcash,
+        mincash=cfg.mincash,
+        corr_hs=cfg.corr_hs,
+        r=cfg.r,
+        sigr=cfg.sigr,
+        sigrh=cfg.sigrh,
+        incaa=cfg.incaa,
+        incb1=cfg.incb1,
+        incb2=cfg.incb2,
+        incb3=cfg.incb3,
+        ret_fac=cfg.ret_fac,
+        minhouse2_value=cfg.minhouse2_value,
+    )
+
+    def _coerce_policy_shape(arr: np.ndarray) -> np.ndarray:
+        # expected: (ncash, nh, tn)
+        if arr.ndim != 3:
+            raise ValueError(f"policy array must be 3D, got shape={arr.shape}")
+        if arr.shape[0] == cfg.ncash and arr.shape[1] == cfg.nh:
+            return arr
+        if arr.shape[0] == cfg.nh and arr.shape[1] == cfg.ncash:
+            return np.transpose(arr, (1, 0, 2))
+        raise ValueError(f"policy array has incompatible shape={arr.shape}, expected (ncash={cfg.ncash}, nh={cfg.nh}, tn)")
+
     def load_or_solve_policy(ppt: float, path: str):
         if recompute_policy or (not os.path.exists(path)):
-            C, A, H, C1, A1, H1 = mymain_se_fn(ppt, ppcost, otcost, rho, delta, psi, cfg.mu, cfg.muh)
+            C, A, H, C1, A1, H1 = mymain_se_fn(
+                ppt,
+                ppcost,
+                otcost,
+                rho,
+                delta,
+                psi,
+                cfg.mu,
+                cfg.muh,
+                gcfg=gcfg_for_solver,
+                fp=fp_for_solver,
+            )
+            C, A, H = map(_coerce_policy_shape, (np.asarray(C), np.asarray(A), np.asarray(H)))
+            C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(C1), np.asarray(A1), np.asarray(H1)))
             savemat(path, {"C": C, "A": A, "H": H, "C1": C1, "A1": A1, "H1": H1})
             return C, A, H, C1, A1, H1
         pmat = loadmat(path)
-        return pmat["C"], pmat["A"], pmat["H"], pmat["C1"], pmat["A1"], pmat["H1"]
+        C, A, H = map(_coerce_policy_shape, (np.asarray(pmat["C"]), np.asarray(pmat["A"]), np.asarray(pmat["H"])))
+        C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(pmat["C1"]), np.asarray(pmat["A1"]), np.asarray(pmat["H1"])))
+        return C, A, H, C1, A1, H1
 
     # === MATLAB section: 根据 policy + 样本做一期仿真 ===
     # 对应 my_estimation_prepost.m 中 pre/post 两段 simulation 主体
