@@ -229,11 +229,9 @@ def my_estimation_prepost(
     mySample = np.asarray(mat.get("sim_mySample", mat.get("mySample")))
 
     # MATLAB mapping:
-    # - cross-section branch (no simulated DID data): moments come from loaded sample mat itself
-    # - DID/sim-data branch: defaults to `Sample_did_nosample.mat` unless caller overrides
-    if moments_path is None and use_sim_data:
-        moments_path = "Sample_did_nosample.mat"
-
+    # - 本函数主体对应 my_estimation_prepost.m 主分支：矩一般来自当前 load 的样本文件
+    # - DID1 系列（my_estimation_prepostdid1*）在各自外层函数中显式 load Sample_did_nosample*.mat
+    #   因此这里不再硬编码默认 DID moments 文件，避免与原函数语义混淆。
     moments_mat = loadmat(moments_path) if moments_path is not None else mat
     W = moments_mat.get("W")
     beta_blocks: list[np.ndarray] = []
@@ -248,8 +246,9 @@ def my_estimation_prepost(
     if W is None or len(beta_blocks) < 4:
         src = moments_path if moments_path is not None else (sim_sample_path if use_sim_data else sample_prepost_path)
         keys = sorted([k for k in moments_mat.keys() if not k.startswith("__")])
+        hint = " (DID路径请显式传 moments_path，例如 Sample_did_nosample*.mat)" if use_sim_data and moments_path is None else ""
         raise KeyError(
-            f"moments file '{src}' must contain W and at least beta1..beta4; available keys={keys}"
+            f"moments file '{src}' must contain W and at least beta1..beta4; available keys={keys}{hint}"
         )
 
     beta_real = np.concatenate(beta_blocks, axis=0)
