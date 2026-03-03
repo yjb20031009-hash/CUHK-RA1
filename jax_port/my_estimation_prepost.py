@@ -212,6 +212,7 @@ def my_estimation_prepost(
     sim_sample_path: str = "sim_mySample2.mat",
     moments_path: str | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
+    # === MATLAB section: 参数拆包 (ppcost, otcost, rho, delta, psi) ===
     myparam = np.asarray(myparam).reshape(-1)
     ppcost, otcost, rho, delta, psi = map(float, myparam[:5])
 
@@ -220,8 +221,18 @@ def my_estimation_prepost(
     if muh is not None:
         cfg = replace(cfg, muh=float(muh))
 
+    # === MATLAB section: 载入样本 ===
+    # 对应 my_estimation_prepost.m 中:
+    #   - 横截面: load Sample_prepost.mat
+    #   - DID/sim: load sim_mySample2.mat; mySample = sim_mySample
     mat = loadmat(sim_sample_path if use_sim_data else sample_prepost_path)
     mySample = np.asarray(mat.get("sim_mySample", mat.get("mySample")))
+
+    # MATLAB mapping:
+    # - cross-section branch (no simulated DID data): moments come from loaded sample mat itself
+    # - DID/sim-data branch: defaults to `Sample_did_nosample.mat` unless caller overrides
+    if moments_path is None and use_sim_data:
+        moments_path = "Sample_did_nosample.mat"
 
     moments_mat = loadmat(moments_path) if moments_path is not None else mat
     W = moments_mat.get("W")
@@ -243,18 +254,23 @@ def my_estimation_prepost(
 
     beta_real = np.concatenate(beta_blocks, axis=0)
 
+    # === MATLAB section: 打状态网格 (gcash, ghouse) ===
     gcash, ghouse = build_state_grids(cfg)
     tb = int(cfg.tb_year / cfg.stept)
     tr = int(cfg.tr_year / cfg.stept)
 
+    # === MATLAB section: Tauchen-Hussey + gret_sh 构造 ===
     gret_sh = build_return_process(cfg, tauchen_fn)
     nn = gret_sh.shape[0]
 
+    # === MATLAB section: 收入增长路径 gyp 与成本回推 ===
     gyp = compute_gyp_path(cfg)
     otcost_t = scale_backward(otcost, gyp)
     ppcost_t = scale_backward(ppcost, gyp)
     minhouse2_t = scale_backward(0.0, gyp)
 
+    # === MATLAB section: 求/载入 policy function ===
+    # 对应 PFunction_prepostdid1_pre.mat / PFunction_prepostdid1_post.mat 逻辑
     def load_or_solve_policy(ppt: float, path: str):
         if recompute_policy or (not os.path.exists(path)):
             C, A, H, C1, A1, H1 = mymain_se_fn(ppt, ppcost, otcost, rho, delta, psi, cfg.mu, cfg.muh)
@@ -263,6 +279,8 @@ def my_estimation_prepost(
         pmat = loadmat(path)
         return pmat["C"], pmat["A"], pmat["H"], pmat["C1"], pmat["A1"], pmat["H1"]
 
+    # === MATLAB section: 根据 policy + 样本做一期仿真 ===
+    # 对应 my_estimation_prepost.m 中 pre/post 两段 simulation 主体
     def simulate_block(ppt: float, C: np.ndarray, A: np.ndarray, H: np.ndarray, C1: np.ndarray, A1: np.ndarray, H1: np.ndarray, sample_block: np.ndarray):
         l = sample_block.shape[0]
         initialW = sample_block[:, 3]
@@ -321,18 +339,21 @@ def my_estimation_prepost(
 
         return simW, simH2, simI, simCp1, simAp1
 
+    # === MATLAB section: pre-tax (ppt=0.00) ===
     C, A, H, C1, A1, H1 = load_or_solve_policy(cfg.ppt_pre, cfg.pfun_pre_path)
     pre_mask = (mySample[:, 7] == 0) | (mySample[:, 6] == 0) if not use_sim_data else (mySample[:, 6] == 0)
     mySample1 = mySample[pre_mask]
     simW, simH2, simI, simCp1, simAp1 = simulate_block(cfg.ppt_pre, C, A, H, C1, A1, H1, mySample1)
     X_pre = build_regressors(mySample1, simW, simH2, simI, nn, did_mode=False)
 
+    # === MATLAB section: post-tax (ppt=0.008) ===
     C, A, H, C1, A1, H1 = load_or_solve_policy(cfg.ppt_post, cfg.pfun_post_path)
     post_mask = (mySample[:, 7] == 1) & (mySample[:, 6] == 1) if not use_sim_data else (mySample[:, 6] == 1)
     mySample2 = mySample[post_mask]
     simW2, simH2_2, simI2, simCp1_2, simAp1_2 = simulate_block(cfg.ppt_post, C, A, H, C1, A1, H1, mySample2)
     X_post = build_regressors(mySample2, simW2, simH2_2, simI2, nn, did_mode=False)
 
+    # === MATLAB section: 分 shock 回归 + 概率加权平均 ===
     def shock_avg_beta(Xk: np.ndarray, yk: np.ndarray) -> np.ndarray:
         betas = np.stack([ols_beta(Xk[k], yk[:, k]) for k in range(nn)], axis=1)
         return (betas @ gret_sh[:, 2].reshape(nn, 1)).reshape(-1)
@@ -350,6 +371,10 @@ def my_estimation_prepost(
     )
     beta_sim = beta_sim_all[: beta_real.shape[0]]
 
+    # === MATLAB section: 目标函数输出 ===
+    # betamat = [empirical moments, model-implied moments]
+    # gvalue  = empirical - model
+    # ggvalue = g' W g
     gvalue = beta_real - beta_sim
     ggvalue = float(gvalue.T @ np.asarray(W) @ gvalue)
     betamat = np.column_stack([beta_real, beta_sim])
