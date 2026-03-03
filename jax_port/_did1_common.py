@@ -56,6 +56,15 @@ def _with_filtered_sample(sample_path: str, fl_filter: int | None) -> str:
     return tmp.name
 
 
+def _default_moments_path(fl_filter: int | None) -> str:
+    """Default DID moments file by variant, matching MATLAB wrappers."""
+    if fl_filter == 1:
+        return "Sample_did_nosample_high.mat"
+    if fl_filter == 0:
+        return "Sample_did_nosample_low.mat"
+    return "Sample_did_nosample.mat"
+
+
 def run_variant(
     myparam: np.ndarray,
     *,
@@ -76,6 +85,10 @@ def run_variant(
         incb3=cfg.incb3,
         otcost_scale=otcost_scale,
     )
+    # IMPORTANT: temporary filtered sample file usually contains only `mySample`,
+    # so DID moments must come from a dedicated moments file.
+    resolved_moments_path = moments_path or _default_moments_path(fl_filter)
+
     tmp = _with_filtered_sample(sample_prepost_path, fl_filter)
     try:
         return my_estimation_prepost(
@@ -87,7 +100,7 @@ def run_variant(
             recompute_policy=recompute_policy,
             sample_prepost_path=tmp,
             sim_sample_path=sim_sample_path,
-            moments_path=moments_path,
+            moments_path=resolved_moments_path,
         )
     finally:
         if os.path.exists(tmp):
