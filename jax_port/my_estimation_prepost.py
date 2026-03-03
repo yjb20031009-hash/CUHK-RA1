@@ -11,6 +11,7 @@ This module mirrors the original workflow:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -198,6 +199,29 @@ def ols_beta(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.linalg.solve(X.T @ X, X.T @ y)
 
 
+def _fallback_did_moments(sample_prepost_path: str) -> dict[str, Any] | None:
+    """Try MATLAB-style DID moments files when current mat has only mySample."""
+    base_dir = Path(sample_prepost_path).resolve().parent
+    candidates = [
+        base_dir / "Sample_did_nosample.mat",
+        base_dir / "Sample_did_nosample_high.mat",
+        base_dir / "Sample_did_nosample_low.mat",
+        Path("Sample_did_nosample.mat"),
+        Path("Sample_did_nosample_high.mat"),
+        Path("Sample_did_nosample_low.mat"),
+    ]
+    for c in candidates:
+        if not c.exists():
+            continue
+        m = loadmat(str(c))
+        if m.get("W") is None:
+            continue
+        if m.get("beta1") is None or m.get("beta2") is None or m.get("beta3") is None or m.get("beta4") is None:
+            continue
+        return m
+    return None
+
+
 def my_estimation_prepost(
     myparam: np.ndarray,
     *,
@@ -234,6 +258,12 @@ def my_estimation_prepost(
     #   因此这里不再硬编码默认 DID moments 文件，避免与原函数语义混淆。
     moments_mat = loadmat(moments_path) if moments_path is not None else mat
     W = moments_mat.get("W")
+    if W is None and moments_path is None:
+        # Robust fallback: DID wrappers often pass a temporary sample-only mat.
+        fallback = _fallback_did_moments(sample_prepost_path)
+        if fallback is not None:
+            moments_mat = fallback
+            W = moments_mat.get("W")
     beta_blocks: list[np.ndarray] = []
     i = 1
     while True:
@@ -246,7 +276,7 @@ def my_estimation_prepost(
     if W is None or len(beta_blocks) < 4:
         src = moments_path if moments_path is not None else (sim_sample_path if use_sim_data else sample_prepost_path)
         keys = sorted([k for k in moments_mat.keys() if not k.startswith("__")])
-        hint = " (DID路径请显式传 moments_path，例如 Sample_did_nosample*.mat)" if use_sim_data and moments_path is None else ""
+        hint = " (DID路径请显式传 moments_path，或在工作目录放置 Sample_did_nosample*.mat)" if moments_path is None else ""
         raise KeyError(
             f"moments file '{src}' must contain W and at least beta1..beta4; available keys={keys}{hint}"
         )
