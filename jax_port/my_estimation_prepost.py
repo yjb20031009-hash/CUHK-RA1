@@ -398,17 +398,69 @@ def my_estimation_prepost(
             t1_mat = min(int(initialAge[i] + 1), C.shape[2])
             cash1 = simW[i, :] + (cfg.ret_fac if (t1_mat > (tr - tb)) else 1.0)
             house1 = simH2[i, :]
-            for k in range(nn):
-                if simI[i, 0] == 0:
-                    simCp1[i, k] = _interp_policy_scalar(gcash, ghouse, C1[:, :, t1_mat - 1], float(house1[k]), float(cash1[k]), "linear")
-                    simAp1[i, k] = _interp_policy_scalar(gcash, ghouse, A1[:, :, t1_mat - 1], float(house1[k]), float(cash1[k]), "linear")
-                    if _interp_policy_scalar(gcash, ghouse, A1[:, :, t1_mat - 1], float(house1[k]), float(cash1[k]), "nearest") == 0.0:
-                        simAp1[i, k] = 0.0
-                else:
-                    simCp1[i, k] = _interp_policy_scalar(gcash, ghouse, C[:, :, t1_mat - 1], float(house1[k]), float(cash1[k]), "linear")
-                    simAp1[i, k] = _interp_policy_scalar(gcash, ghouse, A[:, :, t1_mat - 1], float(house1[k]), float(cash1[k]), "linear")
-                    if _interp_policy_scalar(gcash, ghouse, A[:, :, t1_mat - 1], float(house1[k]), float(cash1[k]), "nearest") == 0.0:
-                        simAp1[i, k] = 0.0
+
+            # 向量化 shock 维度插值，避免逐 k Python 循环带来的 host/device 开销
+            if simI[i, 0] == 0:
+                simCp1_i = interp2_regular(
+                    jnp.asarray(ghouse.reshape(-1)),
+                    jnp.asarray(gcash.reshape(-1)),
+                    jnp.asarray(C1[:, :, t1_mat - 1]),
+                    jnp.asarray(house1),
+                    jnp.asarray(cash1),
+                    method="linear",
+                    bounds="clip",
+                )
+                simAp1_i = interp2_regular(
+                    jnp.asarray(ghouse.reshape(-1)),
+                    jnp.asarray(gcash.reshape(-1)),
+                    jnp.asarray(A1[:, :, t1_mat - 1]),
+                    jnp.asarray(house1),
+                    jnp.asarray(cash1),
+                    method="linear",
+                    bounds="clip",
+                )
+                simAa_i = interp2_regular(
+                    jnp.asarray(ghouse.reshape(-1)),
+                    jnp.asarray(gcash.reshape(-1)),
+                    jnp.asarray(A1[:, :, t1_mat - 1]),
+                    jnp.asarray(house1),
+                    jnp.asarray(cash1),
+                    method="nearest",
+                    bounds="clip",
+                )
+            else:
+                simCp1_i = interp2_regular(
+                    jnp.asarray(ghouse.reshape(-1)),
+                    jnp.asarray(gcash.reshape(-1)),
+                    jnp.asarray(C[:, :, t1_mat - 1]),
+                    jnp.asarray(house1),
+                    jnp.asarray(cash1),
+                    method="linear",
+                    bounds="clip",
+                )
+                simAp1_i = interp2_regular(
+                    jnp.asarray(ghouse.reshape(-1)),
+                    jnp.asarray(gcash.reshape(-1)),
+                    jnp.asarray(A[:, :, t1_mat - 1]),
+                    jnp.asarray(house1),
+                    jnp.asarray(cash1),
+                    method="linear",
+                    bounds="clip",
+                )
+                simAa_i = interp2_regular(
+                    jnp.asarray(ghouse.reshape(-1)),
+                    jnp.asarray(gcash.reshape(-1)),
+                    jnp.asarray(A[:, :, t1_mat - 1]),
+                    jnp.asarray(house1),
+                    jnp.asarray(cash1),
+                    method="nearest",
+                    bounds="clip",
+                )
+
+            simCp1[i, :] = np.asarray(simCp1_i, dtype=float)
+            simAp1_i = np.asarray(simAp1_i, dtype=float)
+            simAa_i = np.asarray(simAa_i, dtype=float)
+            simAp1[i, :] = np.where(simAa_i == 0.0, 0.0, simAp1_i)
 
         return simW, simH2, simI, simCp1, simAp1
 
