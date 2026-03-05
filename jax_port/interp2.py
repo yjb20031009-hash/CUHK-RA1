@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import partial
+
+import jax
 import jax.numpy as jnp
 
 Array = jnp.ndarray
@@ -28,6 +31,7 @@ def _validate_inputs(x: Array, y: Array, v: Array) -> None:
         raise ValueError("v must have shape (len(y), len(x))")
 
 
+@jax.jit
 def interp2_bilinear(x_grid, y_grid, v, xq, yq) -> Array:
     """Bilinear interpolation on regular grid (with clamped query points)."""
     x_grid = _as_array(x_grid)
@@ -63,6 +67,7 @@ def interp2_bilinear(x_grid, y_grid, v, xq, yq) -> Array:
     return v0 * (1.0 - ty) + v1 * ty
 
 
+@jax.jit
 def interp2_nearest(x_grid, y_grid, v, xq, yq) -> Array:
     """Nearest-neighbor interpolation on regular grid (with clamped query points)."""
     x_grid = _as_array(x_grid)
@@ -87,6 +92,7 @@ def interp2_nearest(x_grid, y_grid, v, xq, yq) -> Array:
     return v[iy, ix]
 
 
+@partial(jax.jit, static_argnames=("method", "bounds"))
 def interp2_regular(
     x,
     y,

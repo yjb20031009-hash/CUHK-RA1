@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable
 
 import jax
@@ -35,38 +36,63 @@ class AuxVParams:
     eq_atol: float = 1e-12
 
 
-def my_auxv_cal(myinput: jnp.ndarray, p: AuxVParams, thecash: float, thehouse: float) -> jnp.ndarray:
-    """Return scalar objective value, matching MATLAB `my_auxV_cal` logic."""
+@partial(jax.jit, static_argnames=("model_fn",))
+def _my_auxv_cal_jit(
+    myinput: jnp.ndarray,
+    thecash: float,
+    thehouse: float,
+    *,
+    model_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    t: int,
+    rho: float,
+    delta: float,
+    psi_1: float,
+    psi_2: float,
+    theta: float,
+    gyp: float,
+    adjcost: float,
+    ppt: float,
+    ppcost: float,
+    otcost: float,
+    income: float,
+    survprob: jnp.ndarray,
+    gret_sh: jnp.ndarray,
+    r: float,
+    cash_min: float,
+    cash_max: float,
+    house_min: float,
+    house_max: float,
+    eq_atol: float,
+) -> jnp.ndarray:
     myc, mya, myh = myinput[0], myinput[1], myinput[2]
 
-    u = (1.0 - p.delta) * (myc**p.psi_1)
+    u = (1.0 - delta) * (myc**psi_1)
 
-    house_gross = p.gret_sh[:, 1]
-    housing_nn = myh * house_gross / p.gyp
-    housing_nn = jnp.clip(housing_nn, p.house_min, p.house_max)
+    house_gross = gret_sh[:, 1]
+    housing_nn = myh * house_gross / gyp
+    housing_nn = jnp.clip(housing_nn, house_min, house_max)
 
-    # MATLAB uses exact compare; keep configurable tolerance for optimizer robustness.
-    adjust_house = jnp.logical_not(jnp.isclose(myh, thehouse, atol=p.eq_atol, rtol=0.0))
+    adjust_house = jnp.logical_not(jnp.isclose(myh, thehouse, atol=eq_atol, rtol=0.0))
     participate = mya > 0.0
-    stock_ret = p.gret_sh[:, 0]
+    stock_ret = gret_sh[:, 0]
 
     def case_adj_part(_):
-        sav = thecash + thehouse * (1.0 - p.adjcost - p.ppt) - myc - myh - p.ppcost - p.otcost
-        return (sav * (1.0 - mya) * p.r + sav * mya * stock_ret) / p.gyp + p.income
+        sav = thecash + thehouse * (1.0 - adjcost - ppt) - myc - myh - ppcost - otcost
+        return (sav * (1.0 - mya) * r + sav * mya * stock_ret) / gyp + income
 
     def case_adj_nopart(_):
-        sav = thecash + thehouse * (1.0 - p.adjcost - p.ppt) - myc - myh
-        cash = sav * p.r / p.gyp + p.income
-        return jnp.full((p.nn,), cash)
+        sav = thecash + thehouse * (1.0 - adjcost - ppt) - myc - myh
+        cash = sav * r / gyp + income
+        return jnp.ones_like(stock_ret) * cash
 
     def case_noadj_part(_):
-        sav = thecash + thehouse * (-p.ppt) - myc - p.ppcost - p.otcost
-        return (sav * (1.0 - mya) * p.r + sav * mya * stock_ret) / p.gyp + p.income
+        sav = thecash + thehouse * (-ppt) - myc - ppcost - otcost
+        return (sav * (1.0 - mya) * r + sav * mya * stock_ret) / gyp + income
 
     def case_noadj_nopart(_):
-        sav = thecash + thehouse * (-p.ppt) - myc
-        cash = sav * p.r / p.gyp + p.income
-        return jnp.full((p.nn,), cash)
+        sav = thecash + thehouse * (-ppt) - myc
+        cash = sav * r / gyp + income
+        return jnp.ones_like(stock_ret) * cash
 
     cash_nn = jax.lax.cond(
         adjust_house,
@@ -74,12 +100,41 @@ def my_auxv_cal(myinput: jnp.ndarray, p: AuxVParams, thecash: float, thehouse: f
         lambda _: jax.lax.cond(participate, case_noadj_part, case_noadj_nopart, operand=None),
         operand=None,
     )
-    cash_nn = jnp.clip(cash_nn, p.cash_min, p.cash_max)
+    cash_nn = jnp.clip(cash_nn, cash_min, cash_max)
 
-    int_v = p.model_fn(housing_nn, cash_nn)
-    weights = p.gret_sh[:, 2]
-    surv = p.survprob[p.t] if p.survprob.ndim == 1 else p.survprob[p.t, 0]
+    int_v = model_fn(housing_nn, cash_nn)
+    weights = gret_sh[:, 2]
+    surv = survprob[t] if survprob.ndim == 1 else survprob[t, 0]
 
-    aux_vv = (weights @ (int_v ** (1.0 - p.rho))) * surv
-    aux_v = -((u + p.delta * (aux_vv ** (1.0 / p.theta))) ** p.psi_2)
-    return aux_v
+    aux_vv = (weights @ (int_v ** (1.0 - rho))) * surv
+    return -((u + delta * (aux_vv ** (1.0 / theta))) ** psi_2)
+
+
+def my_auxv_cal(myinput: jnp.ndarray, p: AuxVParams, thecash: float, thehouse: float) -> jnp.ndarray:
+    """Return scalar objective value, matching MATLAB `my_auxV_cal` logic."""
+    return _my_auxv_cal_jit(
+        myinput,
+        thecash,
+        thehouse,
+        model_fn=p.model_fn,
+        t=p.t,
+        rho=p.rho,
+        delta=p.delta,
+        psi_1=p.psi_1,
+        psi_2=p.psi_2,
+        theta=p.theta,
+        gyp=p.gyp,
+        adjcost=p.adjcost,
+        ppt=p.ppt,
+        ppcost=p.ppcost,
+        otcost=p.otcost,
+        income=p.income,
+        survprob=p.survprob,
+        gret_sh=p.gret_sh,
+        r=p.r,
+        cash_min=p.cash_min,
+        cash_max=p.cash_max,
+        house_min=p.house_min,
+        house_max=p.house_max,
+        eq_atol=p.eq_atol,
+    )
