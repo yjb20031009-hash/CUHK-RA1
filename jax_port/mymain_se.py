@@ -145,18 +145,10 @@ def _solve_one_state_discrete(
     gcfg: GridCfg,
     fp: FixedParams,
     minhouse2: float,
-) -> tuple[float, float, float, float]:
-    """单状态点求解。
-
-    给定预算 b 和模式（买房/清零/保持），在候选网格上枚举 (c,a,h)，
-    调用 `my_auxv_cal` 计算目标值（其输出是 -V），再选最小目标值。
-    返回 (c*, a*, h*, V*)。
-    """
-    if b < 0.25:
-        # 预算过低视作不可行，返回极差价值
-        return (0.25, 0.0, 0.0, -jnp.inf)
-
-    cgrid = jnp.linspace(0.25, max(b, 0.25), gcfg.nc)
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """单状态点求解（JAX 友好版本，可被 vmap 批处理）。"""
+    b = jnp.asarray(b)
+    cgrid = jnp.linspace(0.25, jnp.maximum(b, 0.25), gcfg.nc)
     agrid = jnp.linspace(fp.minalpha, 1.0, gcfg.na) if can_participate else jnp.array([0.0])
 
     if h_mode == "keep":
@@ -171,13 +163,16 @@ def _solve_one_state_discrete(
 
     C, A, H = jnp.meshgrid(cgrid, agrid, hgrid, indexing="ij")
     choices = jnp.stack([C, A, H], axis=-1).reshape(-1, 3)
-    mask = feas(C, H).reshape(-1)
+    mask = feas(C, H).reshape(-1) & (b >= 0.25)
 
     vals = jax.vmap(lambda x: my_auxv_cal(x, aux_params, thecash, thehouse))(choices)
     vals = jnp.where(mask, vals, jnp.inf)
-    idx = int(jnp.argmin(vals))
+    idx = jnp.argmin(vals)
     best = choices[idx]
-    return float(best[0]), float(best[1]), float(best[2]), float(-vals[idx])
+    out = jnp.concatenate([best, jnp.array([-vals[idx]])])
+    fallback = jnp.array([0.25, 0.0, 0.0, -jnp.inf])
+    out = jnp.where(jnp.any(mask), out, fallback)
+    return out[0], out[1], out[2], out[3]
 
 
 def mymain_se(
@@ -265,31 +260,40 @@ def mymain_se(
         )
         return aux_params, ppcost, otcost, minhouse2
 
-    # Loop 1: 已经支付过 one-time cost 的人群
+    cash_mesh, house_mesh = jnp.meshgrid(gcash, ghouse, indexing="ij")
+    cash_flat = cash_mesh.reshape(-1)
+    house_flat = house_mesh.reshape(-1)
+
+    def _solve_case_batch(aux_params: AuxVParams, ppc: float, otc: float, minh2: float, *, h_mode: str, can_participate: bool, budget_fn):
+        def _one(c, h):
+            b = budget_fn(c, h, ppc, otc)
+            return jnp.stack(_solve_one_state_discrete(c, h, aux_params, b, h_mode, can_participate, gcfg, fp, minh2))
+
+        return jax.vmap(_one)(cash_flat, house_flat)  # (n_state, 4)
+
+    # Loop 1: 已经支付过 one-time cost 的人群（批量化 state 维度）
     ppcost = float(ppcost_in)
     otcost = 0.0
     for t in range(tn - 2, -1, -1):
         aux, ppcost, otcost, minhouse2 = loop_block(V[:, :, t + 1], t, ppcost, otcost)
-        for i in range(gcfg.ncash):
-            for j in range(gcfg.nh):
-                cash, house = float(gcash[i]), float(ghouse[j])
 
-                # 对应 MATLAB 的 6 种 case：
-                # 1) 处置+参与+买房 2) 处置+参与+不买房
-                # 3) 处置+不参与+买房 4) 处置+不参与+不买房
-                # 5) 不处置+参与      6) 不处置+不参与
-                candidates = [
-                    _solve_one_state_discrete(cash, house, aux, house * (1 - fp.adjcost - ppt) + cash - otcost - ppcost, "buy", True, gcfg, fp, minhouse2),
-                    _solve_one_state_discrete(cash, house, aux, house * (1 - fp.adjcost - ppt) + cash - otcost - ppcost, "zero", True, gcfg, fp, minhouse2),
-                    _solve_one_state_discrete(cash, house, aux, house * (1 - fp.adjcost - ppt) + cash, "buy", False, gcfg, fp, minhouse2),
-                    _solve_one_state_discrete(cash, house, aux, house * (1 - fp.adjcost - ppt) + cash, "zero", False, gcfg, fp, minhouse2),
-                    _solve_one_state_discrete(cash, house, aux, house * (-ppt) + cash - otcost - ppcost, "keep", True, gcfg, fp, minhouse2),
-                    _solve_one_state_discrete(cash, house, aux, house * (-ppt) + cash, "keep", False, gcfg, fp, minhouse2),
-                ]
-                best = max(candidates, key=lambda z: z[3])
-                C[i, j, t], A[i, j, t], H[i, j, t], V[i, j, t] = best
+        case_stack = jnp.stack(
+            [
+                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
+                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
+            ],
+            axis=0,
+        )
+        best_idx = jnp.argmax(case_stack[:, :, 3], axis=0)
+        best = jnp.take_along_axis(case_stack, best_idx[None, :, None], axis=0)[0]
+        best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
+        C[:, :, t], A[:, :, t], H[:, :, t], V[:, :, t] = best_np[:, :, 0], best_np[:, :, 1], best_np[:, :, 2], best_np[:, :, 3]
 
-    # Loop 2: 未支付过 one-time cost 的人群
+    # Loop 2: 未支付过 one-time cost 的人群（批量化 state 维度）
     # 对比“当期支付 otcost”与“继续不支付”两条路径，选价值更高者
     ppcost = float(ppcost_in)
     otcost = float(otcost_in)
@@ -303,31 +307,35 @@ def mymain_se(
             }
         )
 
-        for i in range(gcfg.ncash):
-            for j in range(gcfg.nh):
-                cash, house = float(gcash[i]), float(ghouse[j])
-                pay = max(
-                    [
-                        _solve_one_state_discrete(cash, house, aux_pay, house * (1 - fp.adjcost - ppt) + cash - otcost - ppcost, "buy", True, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_pay, house * (1 - fp.adjcost - ppt) + cash - otcost - ppcost, "zero", True, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_pay, house * (1 - fp.adjcost - ppt) + cash, "buy", False, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_pay, house * (1 - fp.adjcost - ppt) + cash, "zero", False, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_pay, house * (-ppt) + cash - otcost - ppcost, "keep", True, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_pay, house * (-ppt) + cash, "keep", False, gcfg, fp, minhouse2),
-                    ],
-                    key=lambda z: z[3],
-                )
-                # 不支付路径：按 MATLAB 逻辑仅考虑不参与股票相关 case
-                nopay = max(
-                    [
-                        _solve_one_state_discrete(cash, house, aux_nopay, house * (1 - fp.adjcost - ppt) + cash, "buy", False, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_nopay, house * (1 - fp.adjcost - ppt) + cash, "zero", False, gcfg, fp, minhouse2),
-                        _solve_one_state_discrete(cash, house, aux_nopay, house * (-ppt) + cash, "keep", False, gcfg, fp, minhouse2),
-                    ],
-                    key=lambda z: z[3],
-                )
-                best = pay if pay[3] >= nopay[3] else nopay
-                C1[i, j, t], A1[i, j, t], H1[i, j, t], V1[i, j, t] = best
+        pay_stack = jnp.stack(
+            [
+                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
+                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
+            ],
+            axis=0,
+        )
+        pay_idx = jnp.argmax(pay_stack[:, :, 3], axis=0)
+        pay_best = jnp.take_along_axis(pay_stack, pay_idx[None, :, None], axis=0)[0]
+
+        nopay_stack = jnp.stack(
+            [
+                _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
+            ],
+            axis=0,
+        )
+        nopay_idx = jnp.argmax(nopay_stack[:, :, 3], axis=0)
+        nopay_best = jnp.take_along_axis(nopay_stack, nopay_idx[None, :, None], axis=0)[0]
+
+        use_pay = pay_best[:, 3] >= nopay_best[:, 3]
+        best = jnp.where(use_pay[:, None], pay_best, nopay_best)
+        best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
+        C1[:, :, t], A1[:, :, t], H1[:, :, t], V1[:, :, t] = best_np[:, :, 0], best_np[:, :, 1], best_np[:, :, 2], best_np[:, :, 3]
 
     # MATLAB 中对极小房产选择做清零
     H[H < 1e-3] = 0.0
