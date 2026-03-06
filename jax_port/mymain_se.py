@@ -18,6 +18,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.io import loadmat
+from scipy.interpolate import RectBivariateSpline
+from scipy.optimize import minimize
 
 from .my_auxv_cal import AuxVParams, my_auxv_cal
 from .tauchen_hussey import tauchen_hussey
@@ -135,6 +137,126 @@ def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray
     return model_fn
 
 
+def _build_model_fn_spline(v_next_np: np.ndarray, gcash_np: np.ndarray, ghouse_np: np.ndarray) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """Build a MATLAB-like spline interpolator: value(cash, house) -> scalar/array."""
+    # MATLAB: griddedInterpolant({gcash, ghouse}, V_next, 'spline')
+    kx = int(min(3, max(1, len(gcash_np) - 1)))
+    ky = int(min(3, max(1, len(ghouse_np) - 1)))
+    sp = RectBivariateSpline(gcash_np, ghouse_np, v_next_np, kx=kx, ky=ky, s=0.0)
+
+    def model_fn(housing_nn: np.ndarray, cash_nn: np.ndarray) -> np.ndarray:
+        h = np.asarray(housing_nn, dtype=float)
+        c = np.asarray(cash_nn, dtype=float)
+        c, h = np.broadcast_arrays(c, h)
+        out = sp.ev(c.ravel(), h.ravel())
+        return out.reshape(c.shape)
+
+    return model_fn
+
+
+def _my_auxv_cal_np(
+    myinput: np.ndarray,
+    p: AuxVParams,
+    thecash: float,
+    thehouse: float,
+    model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> float:
+    """NumPy/Scipy version of objective used by continuous optimizer."""
+    myc, mya, myh = float(myinput[0]), float(myinput[1]), float(myinput[2])
+    u = (1.0 - p.delta) * (myc ** p.psi_1)
+
+    gret_sh = np.asarray(p.gret_sh)
+    house_gross = gret_sh[:, 1]
+    stock_ret = gret_sh[:, 0]
+    weights = gret_sh[:, 2]
+
+    housing_nn = np.clip(myh * house_gross / p.gyp, p.house_min, p.house_max)
+    adjust_house = not np.isclose(myh, thehouse, atol=p.eq_atol, rtol=0.0)
+    participate = mya > 0.0
+
+    if adjust_house and participate:
+        sav = thecash + thehouse * (1.0 - p.adjcost - p.ppt) - myc - myh - p.ppcost - p.otcost
+        cash_nn = (sav * (1.0 - mya) * p.r + sav * mya * stock_ret) / p.gyp + p.income
+    elif adjust_house and (not participate):
+        sav = thecash + thehouse * (1.0 - p.adjcost - p.ppt) - myc - myh
+        cash_nn = np.full_like(stock_ret, sav * p.r / p.gyp + p.income)
+    elif (not adjust_house) and participate:
+        sav = thecash + thehouse * (-p.ppt) - myc - p.ppcost - p.otcost
+        cash_nn = (sav * (1.0 - mya) * p.r + sav * mya * stock_ret) / p.gyp + p.income
+    else:
+        sav = thecash + thehouse * (-p.ppt) - myc
+        cash_nn = np.full_like(stock_ret, sav * p.r / p.gyp + p.income)
+
+    cash_nn = np.clip(cash_nn, p.cash_min, p.cash_max)
+    int_v = model_fn_np(housing_nn, cash_nn)
+    surv = float(np.asarray(p.survprob)[p.t] if np.asarray(p.survprob).ndim == 1 else np.asarray(p.survprob)[p.t, 0])
+    aux_vv = float(weights @ (int_v ** (1.0 - p.rho))) * surv
+    return -((u + p.delta * (aux_vv ** (1.0 / p.theta))) ** p.psi_2)
+
+
+def _solve_one_state_continuous(
+    thecash: float,
+    thehouse: float,
+    aux_params: AuxVParams,
+    b: float,
+    h_mode: str,
+    can_participate: bool,
+    fp: FixedParams,
+    minhouse2: float,
+    model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> tuple[float, float, float, float]:
+    """Continuous per-state solve (closer to MATLAB fmincon) via SLSQP."""
+    if b < 0.25:
+        return 0.25, 0.0, 0.0, -np.inf
+
+    if h_mode == "keep":
+        h_lb, h_ub = float(thehouse), float(thehouse)
+    elif h_mode == "zero":
+        h_lb, h_ub = 0.0, 0.0
+    else:
+        h_lb, h_ub = float(minhouse2), float(fp.maxhouse)
+
+    if can_participate:
+        a_lb, a_ub = float(fp.minalpha), 1.0
+        a0 = max(a_lb, 0.2)
+    else:
+        a_lb, a_ub = 0.0, 0.0
+        a0 = 0.0
+
+    c_lb, c_ub = 0.25, max(float(b), 0.25)
+    h0 = h_lb if h_lb == h_ub else min(max(h_lb, minhouse2 if h_mode == "buy" else 0.0), h_ub)
+    if h_mode in {"buy", "zero"}:
+        c0 = min(max(c_lb, 0.5 * max(b - h0, c_lb)), c_ub)
+    else:
+        c0 = min(max(c_lb, 0.5 * max(b, c_lb)), c_ub)
+    x0 = np.array([c0, a0, h0], dtype=float)
+
+    def obj(x):
+        return float(_my_auxv_cal_np(np.asarray(x, dtype=float), aux_params, float(thecash), float(thehouse), model_fn_np))
+
+    constraints = []
+    if h_mode in {"buy", "zero"}:
+        constraints.append({"type": "ineq", "fun": lambda x: float(b) - x[0] - x[2]})
+    else:
+        constraints.append({"type": "ineq", "fun": lambda x: float(b) - x[0]})
+
+    res = minimize(
+        obj,
+        x0,
+        method="SLSQP",
+        bounds=[(c_lb, c_ub), (a_lb, a_ub), (h_lb, h_ub)],
+        constraints=constraints,
+        options={"maxiter": 120, "ftol": 1e-7, "disp": False},
+    )
+
+    if not res.success:
+        fval = obj(x0)
+        return float(x0[0]), float(x0[1]), float(x0[2]), float(-fval)
+
+    x = np.asarray(res.x, dtype=float)
+    return float(x[0]), float(x[1]), float(x[2]), float(-res.fun)
+
+
 def _solve_one_state_discrete(
     thecash: float,
     thehouse: float,
@@ -188,6 +310,7 @@ def mymain_se(
     gcfg: GridCfg = GridCfg(),
     lcfg: LifeCfg = LifeCfg(),
     fp: FixedParams = FixedParams(),
+    solver_mode: str = "continuous",
     surv_mat_path: str = "surv.mat",
 ):
     """主求解函数，对应 MATLAB `mymain_se`。
@@ -258,7 +381,8 @@ def mymain_se(
             r=fp.r,
             model_fn=_build_model_fn(jnp.asarray(V_next_np), gcash, ghouse),
         )
-        return aux_params, ppcost, otcost, minhouse2
+        model_fn_np = _build_model_fn_spline(np.asarray(V_next_np, dtype=float), np.asarray(gcash, dtype=float), np.asarray(ghouse, dtype=float))
+        return aux_params, model_fn_np, ppcost, otcost, minhouse2
 
     cash_mesh, house_mesh = jnp.meshgrid(gcash, ghouse, indexing="ij")
     cash_flat = cash_mesh.reshape(-1)
@@ -275,22 +399,36 @@ def mymain_se(
     ppcost = float(ppcost_in)
     otcost = 0.0
     for t in range(tn - 2, -1, -1):
-        aux, ppcost, otcost, minhouse2 = loop_block(V[:, :, t + 1], t, ppcost, otcost)
+        aux, model_fn_np, ppcost, otcost, minhouse2 = loop_block(V[:, :, t + 1], t, ppcost, otcost)
 
-        case_stack = jnp.stack(
-            [
-                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
-                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
-                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
-                _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
-            ],
-            axis=0,
-        )
-        best_idx = jnp.argmax(case_stack[:, :, 3], axis=0)
-        best = jnp.take_along_axis(case_stack, best_idx[None, :, None], axis=0)[0]
-        best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
+        if solver_mode == "continuous":
+            best_np = np.zeros((gcfg.ncash, gcfg.nh, 4), dtype=float)
+            for i in range(gcfg.ncash):
+                for j in range(gcfg.nh):
+                    c, h = float(gcash[i]), float(ghouse[j])
+                    cand = []
+                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "buy", True, fp, minhouse2, model_fn_np))
+                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "zero", True, fp, minhouse2, model_fn_np))
+                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c, "buy", False, fp, minhouse2, model_fn_np))
+                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c, "zero", False, fp, minhouse2, model_fn_np))
+                    cand.append(_solve_one_state_continuous(c, h, aux, h * (-ppt) + c - otcost - ppcost, "keep", True, fp, minhouse2, model_fn_np))
+                    cand.append(_solve_one_state_continuous(c, h, aux, h * (-ppt) + c, "keep", False, fp, minhouse2, model_fn_np))
+                    best_np[i, j, :] = np.asarray(max(cand, key=lambda z: z[3]), dtype=float)
+        else:
+            case_stack = jnp.stack(
+                [
+                    _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                    _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                    _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                    _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                    _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
+                    _solve_case_batch(aux, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
+                ],
+                axis=0,
+            )
+            best_idx = jnp.argmax(case_stack[:, :, 3], axis=0)
+            best = jnp.take_along_axis(case_stack, best_idx[None, :, None], axis=0)[0]
+            best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
         C[:, :, t], A[:, :, t], H[:, :, t], V[:, :, t] = best_np[:, :, 0], best_np[:, :, 1], best_np[:, :, 2], best_np[:, :, 3]
 
     # Loop 2: 未支付过 one-time cost 的人群（批量化 state 维度）
@@ -298,7 +436,7 @@ def mymain_se(
     ppcost = float(ppcost_in)
     otcost = float(otcost_in)
     for t in range(tn - 2, -1, -1):
-        aux_pay, ppcost, otcost, minhouse2 = loop_block(V[:, :, t + 1], t, ppcost, otcost)
+        aux_pay, model_pay_np, ppcost, otcost, minhouse2 = loop_block(V[:, :, t + 1], t, ppcost, otcost)
         aux_nopay = AuxVParams(
             **{
                 **aux_pay.__dict__,
@@ -306,35 +444,58 @@ def mymain_se(
                 "model_fn": _build_model_fn(jnp.asarray(V1[:, :, t + 1]), gcash, ghouse),
             }
         )
+        model_nopay_np = _build_model_fn_spline(np.asarray(V1[:, :, t + 1], dtype=float), np.asarray(gcash, dtype=float), np.asarray(ghouse, dtype=float))
 
-        pay_stack = jnp.stack(
-            [
-                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
-                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
-                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
-                _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
-            ],
-            axis=0,
-        )
-        pay_idx = jnp.argmax(pay_stack[:, :, 3], axis=0)
-        pay_best = jnp.take_along_axis(pay_stack, pay_idx[None, :, None], axis=0)[0]
+        if solver_mode == "continuous":
+            best_np = np.zeros((gcfg.ncash, gcfg.nh, 4), dtype=float)
+            for i in range(gcfg.ncash):
+                for j in range(gcfg.nh):
+                    c, h = float(gcash[i]), float(ghouse[j])
+                    pay_cand = []
+                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "buy", True, fp, minhouse2, model_pay_np))
+                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "zero", True, fp, minhouse2, model_pay_np))
+                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c, "buy", False, fp, minhouse2, model_pay_np))
+                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c, "zero", False, fp, minhouse2, model_pay_np))
+                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (-ppt) + c - otcost - ppcost, "keep", True, fp, minhouse2, model_pay_np))
+                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (-ppt) + c, "keep", False, fp, minhouse2, model_pay_np))
+                    pay_best = max(pay_cand, key=lambda z: z[3])
 
-        nopay_stack = jnp.stack(
-            [
-                _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
-            ],
-            axis=0,
-        )
-        nopay_idx = jnp.argmax(nopay_stack[:, :, 3], axis=0)
-        nopay_best = jnp.take_along_axis(nopay_stack, nopay_idx[None, :, None], axis=0)[0]
+                    nopay_cand = []
+                    nopay_cand.append(_solve_one_state_continuous(c, h, aux_nopay, h * (1 - fp.adjcost - ppt) + c, "buy", False, fp, minhouse2, model_nopay_np))
+                    nopay_cand.append(_solve_one_state_continuous(c, h, aux_nopay, h * (1 - fp.adjcost - ppt) + c, "zero", False, fp, minhouse2, model_nopay_np))
+                    nopay_cand.append(_solve_one_state_continuous(c, h, aux_nopay, h * (-ppt) + c, "keep", False, fp, minhouse2, model_nopay_np))
+                    nopay_best = max(nopay_cand, key=lambda z: z[3])
 
-        use_pay = pay_best[:, 3] >= nopay_best[:, 3]
-        best = jnp.where(use_pay[:, None], pay_best, nopay_best)
-        best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
+                    best_np[i, j, :] = np.asarray(pay_best if pay_best[3] >= nopay_best[3] else nopay_best, dtype=float)
+        else:
+            pay_stack = jnp.stack(
+                [
+                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
+                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
+                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
+                ],
+                axis=0,
+            )
+            pay_idx = jnp.argmax(pay_stack[:, :, 3], axis=0)
+            pay_best = jnp.take_along_axis(pay_stack, pay_idx[None, :, None], axis=0)[0]
+
+            nopay_stack = jnp.stack(
+                [
+                    _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                    _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
+                    _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
+                ],
+                axis=0,
+            )
+            nopay_idx = jnp.argmax(nopay_stack[:, :, 3], axis=0)
+            nopay_best = jnp.take_along_axis(nopay_stack, nopay_idx[None, :, None], axis=0)[0]
+
+            use_pay = pay_best[:, 3] >= nopay_best[:, 3]
+            best = jnp.where(use_pay[:, None], pay_best, nopay_best)
+            best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
         C1[:, :, t], A1[:, :, t], H1[:, :, t], V1[:, :, t] = best_np[:, :, 0], best_np[:, :, 1], best_np[:, :, 2], best_np[:, :, 3]
 
     # MATLAB 中对极小房产选择做清零
