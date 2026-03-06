@@ -204,10 +204,15 @@ def _solve_one_state_continuous(
     fp: FixedParams,
     minhouse2: float,
     model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    x0_override: np.ndarray | None = None,
+    maxiter: int = 80,
+    ftol: float = 1e-6,
 ) -> tuple[float, float, float, float]:
     """Continuous per-state solve (closer to MATLAB fmincon) via SLSQP."""
     if b < 0.25:
         return 0.25, 0.0, 0.0, -np.inf
+    if h_mode == "buy" and b < (0.25 + float(minhouse2)):
+        return 0.25, 0.0, float(minhouse2), -np.inf
 
     if h_mode == "keep":
         h_lb, h_ub = float(thehouse), float(thehouse)
@@ -230,6 +235,12 @@ def _solve_one_state_continuous(
     else:
         c0 = min(max(c_lb, 0.5 * max(b, c_lb)), c_ub)
     x0 = np.array([c0, a0, h0], dtype=float)
+    if x0_override is not None:
+        xo = np.asarray(x0_override, dtype=float).reshape(3)
+        xo[0] = np.clip(xo[0], c_lb, c_ub)
+        xo[1] = np.clip(xo[1], a_lb, a_ub)
+        xo[2] = np.clip(xo[2], h_lb, h_ub)
+        x0 = xo
 
     def obj(x):
         return float(_my_auxv_cal_np(np.asarray(x, dtype=float), aux_params, float(thecash), float(thehouse), model_fn_np))
@@ -246,7 +257,7 @@ def _solve_one_state_continuous(
         method="SLSQP",
         bounds=[(c_lb, c_ub), (a_lb, a_ub), (h_lb, h_ub)],
         constraints=constraints,
-        options={"maxiter": 120, "ftol": 1e-7, "disp": False},
+        options={"maxiter": int(maxiter), "ftol": float(ftol), "disp": False},
     )
 
     if not res.success:
@@ -311,6 +322,8 @@ def mymain_se(
     lcfg: LifeCfg = LifeCfg(),
     fp: FixedParams = FixedParams(),
     solver_mode: str = "continuous",
+    continuous_maxiter: int = 80,
+    continuous_ftol: float = 1e-6,
     surv_mat_path: str = "surv.mat",
 ):
     """主求解函数，对应 MATLAB `mymain_se`。
@@ -395,6 +408,35 @@ def mymain_se(
 
         return jax.vmap(_one)(cash_flat, house_flat)  # (n_state, 4)
 
+    def _solve_cont_case(
+        c: float,
+        h: float,
+        aux_params: AuxVParams,
+        b: float,
+        h_mode: str,
+        can_participate: bool,
+        minhouse2: float,
+        model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray],
+        warm_store: dict[tuple[str, bool], np.ndarray],
+    ) -> tuple[float, float, float, float]:
+        key = (h_mode, can_participate)
+        out = _solve_one_state_continuous(
+            c,
+            h,
+            aux_params,
+            b,
+            h_mode,
+            can_participate,
+            fp,
+            minhouse2,
+            model_fn_np,
+            x0_override=warm_store.get(key),
+            maxiter=continuous_maxiter,
+            ftol=continuous_ftol,
+        )
+        warm_store[key] = np.asarray(out[:3], dtype=float)
+        return out
+
     # Loop 1: 已经支付过 one-time cost 的人群（批量化 state 维度）
     ppcost = float(ppcost_in)
     otcost = 0.0
@@ -404,15 +446,16 @@ def mymain_se(
         if solver_mode == "continuous":
             best_np = np.zeros((gcfg.ncash, gcfg.nh, 4), dtype=float)
             for i in range(gcfg.ncash):
+                warm = {}
                 for j in range(gcfg.nh):
                     c, h = float(gcash[i]), float(ghouse[j])
                     cand = []
-                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "buy", True, fp, minhouse2, model_fn_np))
-                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "zero", True, fp, minhouse2, model_fn_np))
-                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c, "buy", False, fp, minhouse2, model_fn_np))
-                    cand.append(_solve_one_state_continuous(c, h, aux, h * (1 - fp.adjcost - ppt) + c, "zero", False, fp, minhouse2, model_fn_np))
-                    cand.append(_solve_one_state_continuous(c, h, aux, h * (-ppt) + c - otcost - ppcost, "keep", True, fp, minhouse2, model_fn_np))
-                    cand.append(_solve_one_state_continuous(c, h, aux, h * (-ppt) + c, "keep", False, fp, minhouse2, model_fn_np))
+                    cand.append(_solve_cont_case(c, h, aux, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "buy", True, minhouse2, model_fn_np, warm))
+                    cand.append(_solve_cont_case(c, h, aux, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "zero", True, minhouse2, model_fn_np, warm))
+                    cand.append(_solve_cont_case(c, h, aux, h * (1 - fp.adjcost - ppt) + c, "buy", False, minhouse2, model_fn_np, warm))
+                    cand.append(_solve_cont_case(c, h, aux, h * (1 - fp.adjcost - ppt) + c, "zero", False, minhouse2, model_fn_np, warm))
+                    cand.append(_solve_cont_case(c, h, aux, h * (-ppt) + c - otcost - ppcost, "keep", True, minhouse2, model_fn_np, warm))
+                    cand.append(_solve_cont_case(c, h, aux, h * (-ppt) + c, "keep", False, minhouse2, model_fn_np, warm))
                     best_np[i, j, :] = np.asarray(max(cand, key=lambda z: z[3]), dtype=float)
         else:
             case_stack = jnp.stack(
@@ -449,21 +492,23 @@ def mymain_se(
         if solver_mode == "continuous":
             best_np = np.zeros((gcfg.ncash, gcfg.nh, 4), dtype=float)
             for i in range(gcfg.ncash):
+                warm_pay = {}
+                warm_nopay = {}
                 for j in range(gcfg.nh):
                     c, h = float(gcash[i]), float(ghouse[j])
                     pay_cand = []
-                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "buy", True, fp, minhouse2, model_pay_np))
-                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "zero", True, fp, minhouse2, model_pay_np))
-                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c, "buy", False, fp, minhouse2, model_pay_np))
-                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c, "zero", False, fp, minhouse2, model_pay_np))
-                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (-ppt) + c - otcost - ppcost, "keep", True, fp, minhouse2, model_pay_np))
-                    pay_cand.append(_solve_one_state_continuous(c, h, aux_pay, h * (-ppt) + c, "keep", False, fp, minhouse2, model_pay_np))
+                    pay_cand.append(_solve_cont_case(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "buy", True, minhouse2, model_pay_np, warm_pay))
+                    pay_cand.append(_solve_cont_case(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c - otcost - ppcost, "zero", True, minhouse2, model_pay_np, warm_pay))
+                    pay_cand.append(_solve_cont_case(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c, "buy", False, minhouse2, model_pay_np, warm_pay))
+                    pay_cand.append(_solve_cont_case(c, h, aux_pay, h * (1 - fp.adjcost - ppt) + c, "zero", False, minhouse2, model_pay_np, warm_pay))
+                    pay_cand.append(_solve_cont_case(c, h, aux_pay, h * (-ppt) + c - otcost - ppcost, "keep", True, minhouse2, model_pay_np, warm_pay))
+                    pay_cand.append(_solve_cont_case(c, h, aux_pay, h * (-ppt) + c, "keep", False, minhouse2, model_pay_np, warm_pay))
                     pay_best = max(pay_cand, key=lambda z: z[3])
 
                     nopay_cand = []
-                    nopay_cand.append(_solve_one_state_continuous(c, h, aux_nopay, h * (1 - fp.adjcost - ppt) + c, "buy", False, fp, minhouse2, model_nopay_np))
-                    nopay_cand.append(_solve_one_state_continuous(c, h, aux_nopay, h * (1 - fp.adjcost - ppt) + c, "zero", False, fp, minhouse2, model_nopay_np))
-                    nopay_cand.append(_solve_one_state_continuous(c, h, aux_nopay, h * (-ppt) + c, "keep", False, fp, minhouse2, model_nopay_np))
+                    nopay_cand.append(_solve_cont_case(c, h, aux_nopay, h * (1 - fp.adjcost - ppt) + c, "buy", False, minhouse2, model_nopay_np, warm_nopay))
+                    nopay_cand.append(_solve_cont_case(c, h, aux_nopay, h * (1 - fp.adjcost - ppt) + c, "zero", False, minhouse2, model_nopay_np, warm_nopay))
+                    nopay_cand.append(_solve_cont_case(c, h, aux_nopay, h * (-ppt) + c, "keep", False, minhouse2, model_nopay_np, warm_nopay))
                     nopay_best = max(nopay_cand, key=lambda z: z[3])
 
                     best_np[i, j, :] = np.asarray(pay_best if pay_best[3] >= nopay_best[3] else nopay_best, dtype=float)
