@@ -297,6 +297,79 @@ def _solve_one_state_continuous(
         return float(x0[0]), float(x0[1]), float(x0[2]), float(-fval)
 
 
+def _solve_one_state_gpu_continuous(
+    thecash: float,
+    thehouse: float,
+    aux_params: AuxVParams,
+    b: float,
+    h_mode: str,
+    can_participate: bool,
+    fp: FixedParams,
+    minhouse2: float,
+    x0_override: np.ndarray | None = None,
+    maxiter: int = 80,
+    step_size: float = 0.04,
+) -> tuple[float, float, float, float]:
+    """Projected gradient solver with JAX autodiff (continuous choices, GPU-friendly math path)."""
+    if b < 0.25:
+        return 0.25, 0.0, 0.0, -np.inf
+    if h_mode == "buy" and b < (0.25 + float(minhouse2)):
+        return 0.25, 0.0, float(minhouse2), -np.inf
+
+    if h_mode == "keep":
+        h_lb, h_ub = float(thehouse), float(thehouse)
+    elif h_mode == "zero":
+        h_lb, h_ub = 0.0, 0.0
+    else:
+        h_lb, h_ub = float(minhouse2), float(fp.maxhouse)
+
+    if can_participate:
+        a_lb, a_ub = float(fp.minalpha), 1.0
+        a0 = max(a_lb, 0.2)
+    else:
+        a_lb, a_ub = 0.0, 0.0
+        a0 = 0.0
+
+    c_lb, c_ub = 0.25, max(float(b), 0.25)
+    h0 = h_lb if h_lb == h_ub else min(max(h_lb, minhouse2 if h_mode == "buy" else 0.0), h_ub)
+    c0 = min(max(c_lb, 0.5 * max(b - h0, c_lb)), c_ub) if h_mode in {"buy", "zero"} else min(max(c_lb, 0.5 * max(b, c_lb)), c_ub)
+    x0 = np.array([c0, a0, h0], dtype=float)
+    if x0_override is not None:
+        xo = np.asarray(x0_override, dtype=float).reshape(3)
+        x0 = xo
+
+    lb = jnp.array([c_lb, a_lb, h_lb], dtype=jnp.float32)
+    ub = jnp.array([c_ub, a_ub, h_ub], dtype=jnp.float32)
+    x = jnp.asarray(x0, dtype=jnp.float32)
+
+    def project(v: jnp.ndarray) -> jnp.ndarray:
+        v = jnp.clip(v, lb, ub)
+        c, a, h = v[0], v[1], v[2]
+        if h_mode in {"buy", "zero"}:
+            c = jnp.minimum(c, jnp.maximum(0.25, b - h))
+        else:
+            c = jnp.minimum(c, jnp.maximum(0.25, b))
+        c = jnp.clip(c, c_lb, c_ub)
+        return jnp.array([c, a, h], dtype=jnp.float32)
+
+    @jax.jit
+    def obj(v: jnp.ndarray) -> jnp.ndarray:
+        vv = project(v)
+        return my_auxv_cal(vv, aux_params, float(thecash), float(thehouse))
+
+    grad_obj = jax.jit(jax.grad(obj))
+
+    x = project(x)
+    for _ in range(int(maxiter)):
+        g = grad_obj(x)
+        x = project(x - float(step_size) * g)
+
+    fval = float(np.asarray(obj(x)))
+    x_np = np.asarray(project(x), dtype=float)
+    return float(x_np[0]), float(x_np[1]), float(x_np[2]), float(-fval)
+
+
+
 def _solve_one_state_discrete(
     thecash: float,
     thehouse: float,
@@ -367,8 +440,8 @@ def mymain_se(
     if solver_mode == "gpu":
         # GPU-friendly path: fully JAX-batched discrete solver.
         solver_mode = "discrete"
-    elif solver_mode not in {"discrete", "continuous"}:
-        raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous'}")
+    elif solver_mode not in {"discrete", "continuous", "gpu_continuous"}:
+        raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous', 'gpu_continuous'}")
 
     tn = int(lcfg.td - lcfg.tb + 1)
     gcash, ghouse = _build_state_grids(fp, gcfg)
@@ -455,20 +528,34 @@ def mymain_se(
         warm_store: dict[tuple[str, bool], np.ndarray],
     ) -> tuple[float, float, float, float]:
         key = (h_mode, can_participate)
-        out = _solve_one_state_continuous(
-            c,
-            h,
-            aux_params,
-            b,
-            h_mode,
-            can_participate,
-            fp,
-            minhouse2,
-            model_fn_np,
-            x0_override=warm_store.get(key),
-            maxiter=continuous_maxiter,
-            ftol=continuous_ftol,
-        )
+        if solver_mode == "gpu_continuous":
+            out = _solve_one_state_gpu_continuous(
+                c,
+                h,
+                aux_params,
+                b,
+                h_mode,
+                can_participate,
+                fp,
+                minhouse2,
+                x0_override=warm_store.get(key),
+                maxiter=continuous_maxiter,
+            )
+        else:
+            out = _solve_one_state_continuous(
+                c,
+                h,
+                aux_params,
+                b,
+                h_mode,
+                can_participate,
+                fp,
+                minhouse2,
+                model_fn_np,
+                x0_override=warm_store.get(key),
+                maxiter=continuous_maxiter,
+                ftol=continuous_ftol,
+            )
         warm_store[key] = np.asarray(out[:3], dtype=float)
         return out
 
@@ -478,7 +565,7 @@ def mymain_se(
     for t in range(tn - 2, -1, -1):
         aux, model_fn_np, ppcost, otcost, minhouse2 = loop_block(V[:, :, t + 1], t, ppcost, otcost)
 
-        if solver_mode == "continuous":
+        if solver_mode in {"continuous", "gpu_continuous"}:
             best_np = np.zeros((gcfg.ncash, gcfg.nh, 4), dtype=float)
             for i in range(gcfg.ncash):
                 warm = {}
@@ -524,7 +611,7 @@ def mymain_se(
         )
         model_nopay_np = _build_model_fn_spline(np.asarray(V1[:, :, t + 1], dtype=float), np.asarray(gcash, dtype=float), np.asarray(ghouse, dtype=float))
 
-        if solver_mode == "continuous":
+        if solver_mode in {"continuous", "gpu_continuous"}:
             best_np = np.zeros((gcfg.ncash, gcfg.nh, 4), dtype=float)
             for i in range(gcfg.ncash):
                 warm_pay = {}

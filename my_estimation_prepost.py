@@ -202,7 +202,8 @@ def build_regressors(mySample: np.ndarray, simW: np.ndarray, simH2: np.ndarray, 
 
 
 def ols_beta(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    return np.linalg.solve(X.T @ X, X.T @ y)
+    # Match MATLAB implementation (`pinv(X) * y`) for better cross-language comparability.
+    return np.linalg.pinv(X) @ y
 
 
 def _fallback_did_moments(sample_prepost_path: str) -> dict[str, Any] | None:
