@@ -504,10 +504,10 @@ x_sim = my_dataframe(:,5:15);
 x_sim4= my_dataframe(:,16:24);
 
 % estimate beta (model implied moments)
-beta1_sim_mean = (x_sim'*x_sim)\x_sim'*y1; 
-beta2_sim_mean = (x_sim'*x_sim)\x_sim'*y2;
-beta3_sim_mean = (x_sim'*x_sim)\x_sim'*y3;
-beta4_sim_mean = (x_sim4'*x_sim4)\x_sim4'*y4;
+beta1_sim_mean = pinv(x_sim)*y1; 
+beta2_sim_mean = pinv(x_sim)*y2;
+beta3_sim_mean = pinv(x_sim)*y3;
+beta4_sim_mean = pinv(x_sim4)*y4;
 
 % Remove the two-way fixed effects
 beta1_sim_mean([9,10])=[];

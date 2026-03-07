@@ -752,9 +752,9 @@ y2 = my_dataframe(:,2);
 y3 = my_dataframe(:,3);
 x_sim = my_dataframe(:,4:end);
 
-beta1_sim_mean = (x_sim'*x_sim)\x_sim'*y1;
-beta2_sim_mean = (x_sim'*x_sim)\x_sim'*y2;
-beta3_sim_mean = (x_sim'*x_sim)\x_sim'*y3;
+beta1_sim_mean = pinv(x_sim)*y1;
+beta2_sim_mean = pinv(x_sim)*y2;
+beta3_sim_mean = pinv(x_sim)*y3;
 beta1_sim_mean([9,10,11,12,13])=[];
 beta2_sim_mean([9,10,11,12,13])=[];
 beta3_sim_mean([9,10,11,12,13])=[];
