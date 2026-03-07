@@ -9,7 +9,7 @@ This module reproduces the script structure in a callable form:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 
@@ -25,6 +25,8 @@ Estimator = Callable[[np.ndarray], tuple[float, np.ndarray, np.ndarray]]
 @dataclass
 class MySolutionResult:
     quick_test_value: float | None
+    quick_test_raw_ggvalue: float | None
+    quick_test_rmse: float | None
     optimized: dict
     evaluations: dict
 
@@ -50,6 +52,8 @@ def run_my_solution(
     moments_high_path: str = "Sample_did_nosample_high.mat",
     moments_low_path: str = "Sample_did_nosample_low.mat",
     run_quick_test: bool = True,
+    quick_test_metric: Literal["ggvalue", "rmse", "scaled_ggvalue"] = "ggvalue",
+    quick_test_scale: float = 1.0,
     run_5param: bool = True,
     run_7param: bool = True,
     run_8param: bool = False,
@@ -60,12 +64,26 @@ def run_my_solution(
     optimized: dict[str, dict] = {}
     evaluations: dict[str, float] = {}
     quick_test_value: float | None = None
+    quick_test_raw_ggvalue: float | None = None
+    quick_test_rmse: float | None = None
 
     if run_quick_test:
-        quick_test_value, _, _ = my_estimation_prepostdid1_high(
+        quick_test_raw_ggvalue, g_quick, _ = my_estimation_prepostdid1_high(
             np.array([0.2090, 0.11054, 0.6103, 0.9940, 0.9885, 0.3096, 0.3269, 0.2]),
             moments_path=moments_high_path,
         )
+        quick_test_rmse = float(np.sqrt(np.mean(np.asarray(g_quick, dtype=float) ** 2)))
+
+        if quick_test_metric == "ggvalue":
+            quick_test_value = float(quick_test_raw_ggvalue)
+        elif quick_test_metric == "rmse":
+            quick_test_value = quick_test_rmse
+        elif quick_test_metric == "scaled_ggvalue":
+            quick_test_value = float(quick_test_raw_ggvalue * quick_test_scale)
+        else:
+            raise ValueError(
+                "quick_test_metric must be one of {'ggvalue', 'rmse', 'scaled_ggvalue'}"
+            )
 
     if run_5param:
         optimized["did1_5param_full"] = _run_one(
@@ -130,4 +148,10 @@ def run_my_solution(
         )
         evaluations[name] = float(gg)
 
-    return MySolutionResult(quick_test_value=quick_test_value, optimized=optimized, evaluations=evaluations)
+    return MySolutionResult(
+        quick_test_value=quick_test_value,
+        quick_test_raw_ggvalue=quick_test_raw_ggvalue,
+        quick_test_rmse=quick_test_rmse,
+        optimized=optimized,
+        evaluations=evaluations,
+    )
