@@ -321,7 +321,7 @@ def mymain_se(
     gcfg: GridCfg = GridCfg(),
     lcfg: LifeCfg = LifeCfg(),
     fp: FixedParams = FixedParams(),
-    solver_mode: str = "continuous",
+    solver_mode: str = "gpu",
     continuous_maxiter: int = 80,
     continuous_ftol: float = 1e-6,
     surv_mat_path: str = "surv.mat",
@@ -335,6 +335,12 @@ def mymain_se(
     - Loop 1: 已支付 one-time cost 的人群（输出 C/A/H/V）
     - Loop 2: 未支付人群，对比“当期支付 vs 不支付”（输出 C1/A1/H1/V1）
     """
+    if solver_mode == "gpu":
+        # GPU-friendly path: fully JAX-batched discrete solver.
+        solver_mode = "discrete"
+    elif solver_mode not in {"discrete", "continuous"}:
+        raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous'}")
+
     tn = int(lcfg.td - lcfg.tb + 1)
     gcash, ghouse = _build_state_grids(fp, gcfg)
     survprob = _load_survprob(surv_mat_path)

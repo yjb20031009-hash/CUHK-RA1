@@ -46,6 +46,12 @@ class EstimationConfig:
     ppt_post: float = 0.008
 
     n_shock_1d: int = 3
+    solver_mode: str = "gpu"
+    discrete_na: int = 9
+    discrete_nc: int = 5
+    discrete_nh2: int = 9
+    continuous_maxiter: int = 80
+    continuous_ftol: float = 1e-6
     corr_hs: float = -0.08
     r: float = 1.05 - 0.048
     mu: float = 0.08
@@ -300,7 +306,14 @@ def my_estimation_prepost(
 
     # === MATLAB section: 求/载入 policy function ===
     # 对应 PFunction_prepostdid1_pre.mat / PFunction_prepostdid1_post.mat 逻辑
-    gcfg_for_solver = GridCfg(n=cfg.n_shock_1d, ncash=cfg.ncash, nh=cfg.nh)
+    gcfg_for_solver = GridCfg(
+        n=cfg.n_shock_1d,
+        ncash=cfg.ncash,
+        nh=cfg.nh,
+        na=cfg.discrete_na,
+        nc=cfg.discrete_nc,
+        nh2=cfg.discrete_nh2,
+    )
     fp_for_solver = FixedParams(
         adjcost=cfg.adjcost,
         maxhouse=cfg.maxhouse,
@@ -342,6 +355,9 @@ def my_estimation_prepost(
                 cfg.muh,
                 gcfg=gcfg_for_solver,
                 fp=fp_for_solver,
+                solver_mode=cfg.solver_mode,
+                continuous_maxiter=cfg.continuous_maxiter,
+                continuous_ftol=cfg.continuous_ftol,
             )
             C, A, H = map(_coerce_policy_shape, (np.asarray(C), np.asarray(A), np.asarray(H)))
             C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(C1), np.asarray(A1), np.asarray(H1)))
