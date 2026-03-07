@@ -202,9 +202,8 @@ def build_regressors(mySample: np.ndarray, simW: np.ndarray, simH2: np.ndarray, 
 
 
 def ols_beta(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    # Use least-squares solver directly for better numerical stability when X'X is near singular.
-    # This matches OLS in the full-rank case and behaves like a pseudo-inverse solution otherwise.
-    return np.linalg.lstsq(X, y, rcond=None)[0]
+    # Match MATLAB implementation (`pinv(X) * y`) for better cross-language comparability.
+    return np.linalg.pinv(X) @ y
 
 
 def _fallback_did_moments(sample_prepost_path: str) -> dict[str, Any] | None:
