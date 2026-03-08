@@ -126,4 +126,7 @@ def base_cfg(**kwargs) -> EstimationConfig:
     # MATLAB baseline uses per-state nonlinear optimization (`fmincon`-style).
     # Use continuous solver mode by default for better cross-language comparability,
     # while still allowing callers to override via kwargs.
-    return replace(EstimationConfig(), ncash=21, nh=11, solver_mode="continuous", **kwargs)
+    cfg = replace(EstimationConfig(), ncash=21, nh=11, solver_mode="continuous")
+    if kwargs:
+        cfg = replace(cfg, **kwargs)
+    return cfg
