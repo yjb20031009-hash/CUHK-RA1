@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
-from typing import Callable
-
 import jax
 import jax.numpy as jnp
+
+from interp2 import interp2_regular
 
 
 @dataclass(frozen=True)
@@ -28,7 +27,9 @@ class AuxVParams:
     survprob: jnp.ndarray
     gret_sh: jnp.ndarray  # (nn, 3): [stock_ret, house_gross, weight]
     r: float
-    model_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    v_next: jnp.ndarray
+    gcash_grid: jnp.ndarray
+    ghouse_grid: jnp.ndarray
     cash_min: float = 0.25
     cash_max: float = 19.9
     house_min: float = 0.25
@@ -36,13 +37,15 @@ class AuxVParams:
     eq_atol: float = 1e-12
 
 
-@partial(jax.jit, static_argnames=("model_fn",))
+@jax.jit
 def _my_auxv_cal_jit(
     myinput: jnp.ndarray,
     thecash: float,
     thehouse: float,
     *,
-    model_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    v_next: jnp.ndarray,
+    gcash_grid: jnp.ndarray,
+    ghouse_grid: jnp.ndarray,
     t: int,
     rho: float,
     delta: float,
@@ -102,7 +105,7 @@ def _my_auxv_cal_jit(
     )
     cash_nn = jnp.clip(cash_nn, cash_min, cash_max)
 
-    int_v = model_fn(housing_nn, cash_nn)
+    int_v = interp2_regular(ghouse_grid, gcash_grid, v_next, housing_nn, cash_nn, method="linear", bounds="clip")
     weights = gret_sh[:, 2]
     surv = survprob[t] if survprob.ndim == 1 else survprob[t, 0]
 
@@ -116,7 +119,9 @@ def my_auxv_cal(myinput: jnp.ndarray, p: AuxVParams, thecash: float, thehouse: f
         myinput,
         thecash,
         thehouse,
-        model_fn=p.model_fn,
+        v_next=p.v_next,
+        gcash_grid=p.gcash_grid,
+        ghouse_grid=p.ghouse_grid,
         t=p.t,
         rho=p.rho,
         delta=p.delta,

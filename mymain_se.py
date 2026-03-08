@@ -521,7 +521,9 @@ def mymain_se(
             survprob=survprob,
             gret_sh=gret_sh,
             r=fp.r,
-            model_fn=_build_model_fn(jnp.asarray(V_next_np), gcash, ghouse),
+            v_next=jnp.asarray(V_next_np),
+            gcash_grid=jnp.asarray(gcash),
+            ghouse_grid=jnp.asarray(ghouse),
         )
         model_fn_np = _build_model_fn_spline(np.asarray(V_next_np, dtype=float), np.asarray(gcash, dtype=float), np.asarray(ghouse, dtype=float))
         return aux_params, model_fn_np, ppcost, otcost, minhouse2
@@ -627,7 +629,9 @@ def mymain_se(
             **{
                 **aux_pay.__dict__,
                 "otcost": 0.0,
-                "model_fn": _build_model_fn(jnp.asarray(V1[:, :, t + 1]), gcash, ghouse),
+                "v_next": jnp.asarray(V1[:, :, t + 1]),
+                "gcash_grid": jnp.asarray(gcash),
+                "ghouse_grid": jnp.asarray(ghouse),
             }
         )
         model_nopay_np = _build_model_fn_spline(np.asarray(V1[:, :, t + 1], dtype=float), np.asarray(gcash, dtype=float), np.asarray(ghouse, dtype=float))
