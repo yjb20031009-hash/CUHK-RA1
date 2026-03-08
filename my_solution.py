@@ -60,6 +60,10 @@ def run_my_solution(
     moments_high_path: str = "Sample_did_nosample_high.mat",
     moments_low_path: str = "Sample_did_nosample_low.mat",
     run_quick_test: bool = True,
+    quick_recompute_policy: bool = True,
+    quick_solver_mode: str | None = None,
+    quick_continuous_maxiter: int | None = None,
+    quick_continuous_ftol: float | None = None,
     xla_gpu_autotune_level: int | None = None,
     run_5param: bool = True,
     run_7param: bool = True,
@@ -78,6 +82,10 @@ def run_my_solution(
         quick_test_value, _, _ = my_estimation_prepostdid1_high(
             np.array([0.2090, 0.11054, 0.6103, 0.9940, 0.9885, 0.3096, 0.3269, 0.2]),
             moments_path=moments_high_path,
+            recompute_policy=quick_recompute_policy,
+            solver_mode=quick_solver_mode,
+            continuous_maxiter=quick_continuous_maxiter,
+            continuous_ftol=quick_continuous_ftol,
         )
 
     if run_5param:
