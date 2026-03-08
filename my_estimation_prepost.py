@@ -202,7 +202,29 @@ def build_regressors(mySample: np.ndarray, simW: np.ndarray, simH2: np.ndarray, 
 
 
 def ols_beta(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    return np.linalg.solve(X.T @ X, X.T @ y)
+    """MATLAB-like OLS with robust fallbacks for ill-conditioned/singular inputs."""
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float).reshape(-1)
+
+    # MATLAB often proceeds with warnings on near-singular systems; emulate that behavior
+    # by filtering non-finite rows and using progressively more stable fallbacks.
+    finite_mask = np.all(np.isfinite(X), axis=1) & np.isfinite(y)
+    Xf = X[finite_mask]
+    yf = y[finite_mask]
+
+    if Xf.size == 0 or Xf.shape[0] == 0:
+        return np.zeros(X.shape[1], dtype=float)
+
+    try:
+        return np.linalg.pinv(Xf, rcond=1e-10) @ yf
+    except np.linalg.LinAlgError:
+        try:
+            return np.linalg.lstsq(Xf, yf, rcond=1e-8)[0]
+        except np.linalg.LinAlgError:
+            xtx = Xf.T @ Xf
+            xty = Xf.T @ yf
+            lam = 1e-8
+            return np.linalg.solve(xtx + lam * np.eye(xtx.shape[0]), xty)
 
 
 def _fallback_did_moments(sample_prepost_path: str) -> dict[str, Any] | None:
