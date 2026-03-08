@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
-from typing import Callable
-
 import jax
 import jax.numpy as jnp
+
+from interp2 import interp2_regular
+
+
+def _f32(x):
+    return jnp.asarray(x, dtype=jnp.float32)
+
+
+def _i32(x):
+    return jnp.asarray(x, dtype=jnp.int32)
 
 
 @dataclass(frozen=True)
@@ -28,7 +35,9 @@ class AuxVParams:
     survprob: jnp.ndarray
     gret_sh: jnp.ndarray  # (nn, 3): [stock_ret, house_gross, weight]
     r: float
-    model_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    v_next: jnp.ndarray
+    gcash_grid: jnp.ndarray
+    ghouse_grid: jnp.ndarray
     cash_min: float = 0.25
     cash_max: float = 19.9
     house_min: float = 0.25
@@ -36,13 +45,15 @@ class AuxVParams:
     eq_atol: float = 1e-12
 
 
-@partial(jax.jit, static_argnames=("model_fn",))
+@jax.jit
 def _my_auxv_cal_jit(
     myinput: jnp.ndarray,
     thecash: float,
     thehouse: float,
     *,
-    model_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    v_next: jnp.ndarray,
+    gcash_grid: jnp.ndarray,
+    ghouse_grid: jnp.ndarray,
     t: int,
     rho: float,
     delta: float,
@@ -102,7 +113,7 @@ def _my_auxv_cal_jit(
     )
     cash_nn = jnp.clip(cash_nn, cash_min, cash_max)
 
-    int_v = model_fn(housing_nn, cash_nn)
+    int_v = interp2_regular(ghouse_grid, gcash_grid, v_next, housing_nn, cash_nn, method="linear", bounds="clip")
     weights = gret_sh[:, 2]
     surv = survprob[t] if survprob.ndim == 1 else survprob[t, 0]
 
@@ -113,28 +124,30 @@ def _my_auxv_cal_jit(
 def my_auxv_cal(myinput: jnp.ndarray, p: AuxVParams, thecash: float, thehouse: float) -> jnp.ndarray:
     """Return scalar objective value, matching MATLAB `my_auxV_cal` logic."""
     return _my_auxv_cal_jit(
-        myinput,
-        thecash,
-        thehouse,
-        model_fn=p.model_fn,
-        t=p.t,
-        rho=p.rho,
-        delta=p.delta,
-        psi_1=p.psi_1,
-        psi_2=p.psi_2,
-        theta=p.theta,
-        gyp=p.gyp,
-        adjcost=p.adjcost,
-        ppt=p.ppt,
-        ppcost=p.ppcost,
-        otcost=p.otcost,
-        income=p.income,
-        survprob=p.survprob,
-        gret_sh=p.gret_sh,
-        r=p.r,
-        cash_min=p.cash_min,
-        cash_max=p.cash_max,
-        house_min=p.house_min,
-        house_max=p.house_max,
-        eq_atol=p.eq_atol,
+        _f32(myinput),
+        _f32(thecash),
+        _f32(thehouse),
+        v_next=_f32(p.v_next),
+        gcash_grid=_f32(p.gcash_grid),
+        ghouse_grid=_f32(p.ghouse_grid),
+        t=_i32(p.t),
+        rho=_f32(p.rho),
+        delta=_f32(p.delta),
+        psi_1=_f32(p.psi_1),
+        psi_2=_f32(p.psi_2),
+        theta=_f32(p.theta),
+        gyp=_f32(p.gyp),
+        adjcost=_f32(p.adjcost),
+        ppt=_f32(p.ppt),
+        ppcost=_f32(p.ppcost),
+        otcost=_f32(p.otcost),
+        income=_f32(p.income),
+        survprob=_f32(p.survprob),
+        gret_sh=_f32(p.gret_sh),
+        r=_f32(p.r),
+        cash_min=_f32(p.cash_min),
+        cash_max=_f32(p.cash_max),
+        house_min=_f32(p.house_min),
+        house_max=_f32(p.house_max),
+        eq_atol=_f32(p.eq_atol),
     )

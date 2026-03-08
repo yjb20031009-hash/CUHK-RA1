@@ -8,6 +8,7 @@ This module reproduces the script structure in a callable form:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -43,6 +44,15 @@ def _run_one(estimator, x0: np.ndarray, sigma0: np.ndarray, opts: CMAESOptions, 
     return {"x": res.xmin, "f": res.fmin, "iters": res.iterations, "evals": res.evaluations, "success": res.success}
 
 
+def _set_xla_gpu_autotune_level(level: int) -> None:
+    """Set `--xla_gpu_autotune_level` in XLA_FLAGS for the current process."""
+    key = "--xla_gpu_autotune_level="
+    current = os.environ.get("XLA_FLAGS", "")
+    toks = [t for t in current.split() if t and not t.startswith(key)]
+    toks.append(f"{key}{int(level)}")
+    os.environ["XLA_FLAGS"] = " ".join(toks)
+
+
 def run_my_solution(
     *,
     opts: CMAESOptions | None = None,
@@ -50,12 +60,15 @@ def run_my_solution(
     moments_high_path: str = "Sample_did_nosample_high.mat",
     moments_low_path: str = "Sample_did_nosample_low.mat",
     run_quick_test: bool = True,
+    xla_gpu_autotune_level: int | None = None,
     run_5param: bool = True,
     run_7param: bool = True,
     run_8param: bool = False,
 ) -> MySolutionResult:
     """Run optimization scenarios translated from MATLAB `my_solution.m`."""
     opts = opts or CMAESOptions(max_iter=8, tol_x=1e-2, stop_fitness=1e-2, lbounds=0.01, ubounds=0.99)
+    if xla_gpu_autotune_level is not None:
+        _set_xla_gpu_autotune_level(xla_gpu_autotune_level)
 
     optimized: dict[str, dict] = {}
     evaluations: dict[str, float] = {}
