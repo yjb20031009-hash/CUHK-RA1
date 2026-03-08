@@ -271,7 +271,10 @@ def _solve_one_state_continuous(
         "Display": False,
     }
 
-    # Call fmincon; the wrapper handles bounds and gradient via JAX
+    # Call fmincon; the wrapper handles bounds and gradient via JAX.
+    # NOTE: MATLAB often returns useful x/fval even when exitflag != 1
+    # (for example when max iterations are reached). Keep that behavior
+    # and accept any finite optimizer output.
     try:
         res = fmincon(
             fun=obj,
@@ -283,14 +286,14 @@ def _solve_one_state_continuous(
             nonlcon=None,
             options=fmincon_opts,
         )
-        # Success if exitflag == 1
-        if res.exitflag == 1:
-            x_opt = np.asarray(res.x, dtype=float)
-            return float(x_opt[0]), float(x_opt[1]), float(x_opt[2]), float(-res.fval)
-        else:
-            # Fallback to current guess if optimization fails
-            fval = float(np.asarray(obj(x0)))
-            return float(x0[0]), float(x0[1]), float(x0[2]), float(-fval)
+        x_opt = np.asarray(res.x, dtype=float).reshape(3)
+        fval_opt = float(np.asarray(res.fval))
+        if np.all(np.isfinite(x_opt)) and np.isfinite(fval_opt):
+            return float(x_opt[0]), float(x_opt[1]), float(x_opt[2]), float(-fval_opt)
+
+        # Degenerate optimizer output; fall back to initial guess.
+        fval0 = float(np.asarray(obj(x0)))
+        return float(x0[0]), float(x0[1]), float(x0[2]), float(-fval0)
     except Exception:
         # In case fmincon raises an unexpected error, fall back to initial guess
         fval = float(np.asarray(obj(x0)))
