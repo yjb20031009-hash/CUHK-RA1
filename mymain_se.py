@@ -297,6 +297,43 @@ def _solve_one_state_continuous(
         return float(x0[0]), float(x0[1]), float(x0[2]), float(-fval)
 
 
+def _gpu_cont_project(
+    v: jnp.ndarray,
+    lb: jnp.ndarray,
+    ub: jnp.ndarray,
+    b: float,
+    c_lb: float,
+    c_ub: float,
+    buy_or_zero: bool,
+) -> jnp.ndarray:
+    """Projection for GPU-continuous solver constraints."""
+    v = jnp.clip(v, lb, ub)
+    c, a, h = v[0], v[1], v[2]
+    c_cap = jnp.where(buy_or_zero, jnp.maximum(0.25, b - h), jnp.maximum(0.25, b))
+    c = jnp.clip(jnp.minimum(c, c_cap), c_lb, c_ub)
+    return jnp.array([c, a, h], dtype=jnp.float32)
+
+
+@jax.jit
+def _gpu_cont_obj(
+    v: jnp.ndarray,
+    lb: jnp.ndarray,
+    ub: jnp.ndarray,
+    b: float,
+    c_lb: float,
+    c_ub: float,
+    buy_or_zero: bool,
+    aux_params: AuxVParams,
+    thecash: float,
+    thehouse: float,
+) -> jnp.ndarray:
+    vv = _gpu_cont_project(v, lb, ub, b, c_lb, c_ub, buy_or_zero)
+    return my_auxv_cal(vv, aux_params, thecash, thehouse)
+
+
+_gpu_cont_grad = jax.jit(jax.grad(_gpu_cont_obj, argnums=0))
+
+
 def _solve_one_state_gpu_continuous(
     thecash: float,
     thehouse: float,
@@ -342,30 +379,14 @@ def _solve_one_state_gpu_continuous(
     ub = jnp.array([c_ub, a_ub, h_ub], dtype=jnp.float32)
     x = jnp.asarray(x0, dtype=jnp.float32)
 
-    def project(v: jnp.ndarray) -> jnp.ndarray:
-        v = jnp.clip(v, lb, ub)
-        c, a, h = v[0], v[1], v[2]
-        if h_mode in {"buy", "zero"}:
-            c = jnp.minimum(c, jnp.maximum(0.25, b - h))
-        else:
-            c = jnp.minimum(c, jnp.maximum(0.25, b))
-        c = jnp.clip(c, c_lb, c_ub)
-        return jnp.array([c, a, h], dtype=jnp.float32)
-
-    @jax.jit
-    def obj(v: jnp.ndarray) -> jnp.ndarray:
-        vv = project(v)
-        return my_auxv_cal(vv, aux_params, float(thecash), float(thehouse))
-
-    grad_obj = jax.jit(jax.grad(obj))
-
-    x = project(x)
+    buy_or_zero = h_mode in {"buy", "zero"}
+    x = _gpu_cont_project(x, lb, ub, b, c_lb, c_ub, buy_or_zero)
     for _ in range(int(maxiter)):
-        g = grad_obj(x)
-        x = project(x - float(step_size) * g)
+        g = _gpu_cont_grad(x, lb, ub, b, c_lb, c_ub, buy_or_zero, aux_params, float(thecash), float(thehouse))
+        x = _gpu_cont_project(x - float(step_size) * g, lb, ub, b, c_lb, c_ub, buy_or_zero)
 
-    fval = float(np.asarray(obj(x)))
-    x_np = np.asarray(project(x), dtype=float)
+    fval = float(np.asarray(_gpu_cont_obj(x, lb, ub, b, c_lb, c_ub, buy_or_zero, aux_params, float(thecash), float(thehouse))))
+    x_np = np.asarray(_gpu_cont_project(x, lb, ub, b, c_lb, c_ub, buy_or_zero), dtype=float)
     return float(x_np[0]), float(x_np[1]), float(x_np[2]), float(-fval)
 
 
