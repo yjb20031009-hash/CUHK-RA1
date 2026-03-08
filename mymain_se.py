@@ -693,13 +693,13 @@ def mymain_se(
             )
         )
 
-        x = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub)
+        x = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
         for _ in range(int(continuous_maxiter)):
             g = grad_vmap(x, lb, ub, b_vec, c_lb, c_ub, thecash_vec, thehouse_vec)
-            x = proj_vmap(x - jnp.float32(0.04) * g, lb, ub, b_vec, c_lb, c_ub)
+            x = proj_vmap(x - jnp.float32(0.04) * g, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
 
         vals = obj_vmap(x, lb, ub, b_vec, c_lb, c_ub, thecash_vec, thehouse_vec)
-        x = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub)
+        x = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
         return jnp.column_stack([x[:, 0], x[:, 1], x[:, 2], -vals])
 
     def _solve_cont_case(
