@@ -24,7 +24,7 @@ from scipy.optimize import minimize  # kept for other potential uses
 # Import fmincon for MATLAB-like nonlinear optimization
 from fmincon import fmincon
 
-from my_auxv_cal import AuxVParams, my_auxv_cal
+from my_auxv_cal import AuxVParams, my_auxv_cal, _my_auxv_cal_jit
 from tauchen_hussey import tauchen_hussey
 
 
@@ -323,12 +323,61 @@ def _gpu_cont_obj(
     c_lb: float,
     c_ub: float,
     buy_or_zero: bool,
-    aux_params: AuxVParams,
     thecash: float,
     thehouse: float,
+    t: jnp.ndarray,
+    rho: jnp.ndarray,
+    delta: jnp.ndarray,
+    psi_1: jnp.ndarray,
+    psi_2: jnp.ndarray,
+    theta: jnp.ndarray,
+    gyp: jnp.ndarray,
+    adjcost: jnp.ndarray,
+    ppt: jnp.ndarray,
+    ppcost: jnp.ndarray,
+    otcost: jnp.ndarray,
+    income: jnp.ndarray,
+    survprob: jnp.ndarray,
+    gret_sh: jnp.ndarray,
+    r: jnp.ndarray,
+    cash_min: jnp.ndarray,
+    cash_max: jnp.ndarray,
+    house_min: jnp.ndarray,
+    house_max: jnp.ndarray,
+    eq_atol: jnp.ndarray,
+    v_next: jnp.ndarray,
+    gcash_grid: jnp.ndarray,
+    ghouse_grid: jnp.ndarray,
 ) -> jnp.ndarray:
     vv = _gpu_cont_project(v, lb, ub, b, c_lb, c_ub, buy_or_zero)
-    return my_auxv_cal(vv, aux_params, thecash, thehouse)
+    return _my_auxv_cal_jit(
+        vv,
+        thecash,
+        thehouse,
+        v_next=v_next,
+        gcash_grid=gcash_grid,
+        ghouse_grid=ghouse_grid,
+        t=t,
+        rho=rho,
+        delta=delta,
+        psi_1=psi_1,
+        psi_2=psi_2,
+        theta=theta,
+        gyp=gyp,
+        adjcost=adjcost,
+        ppt=ppt,
+        ppcost=ppcost,
+        otcost=otcost,
+        income=income,
+        survprob=survprob,
+        gret_sh=gret_sh,
+        r=r,
+        cash_min=cash_min,
+        cash_max=cash_max,
+        house_min=house_min,
+        house_max=house_max,
+        eq_atol=eq_atol,
+    )
 
 
 _gpu_cont_grad = jax.jit(jax.grad(_gpu_cont_obj, argnums=0))
@@ -380,12 +429,40 @@ def _solve_one_state_gpu_continuous(
     x = jnp.asarray(x0, dtype=jnp.float32)
 
     buy_or_zero = h_mode in {"buy", "zero"}
+    thecash32 = jnp.asarray(thecash, dtype=jnp.float32)
+    thehouse32 = jnp.asarray(thehouse, dtype=jnp.float32)
+    aux_args = (
+        jnp.asarray(aux_params.t, dtype=jnp.int32),
+        jnp.asarray(aux_params.rho, dtype=jnp.float32),
+        jnp.asarray(aux_params.delta, dtype=jnp.float32),
+        jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
+        jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
+        jnp.asarray(aux_params.theta, dtype=jnp.float32),
+        jnp.asarray(aux_params.gyp, dtype=jnp.float32),
+        jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
+        jnp.asarray(aux_params.ppt, dtype=jnp.float32),
+        jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
+        jnp.asarray(aux_params.otcost, dtype=jnp.float32),
+        jnp.asarray(aux_params.income, dtype=jnp.float32),
+        jnp.asarray(aux_params.survprob, dtype=jnp.float32),
+        jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
+        jnp.asarray(aux_params.r, dtype=jnp.float32),
+        jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
+        jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
+        jnp.asarray(aux_params.house_min, dtype=jnp.float32),
+        jnp.asarray(aux_params.house_max, dtype=jnp.float32),
+        jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
+        jnp.asarray(aux_params.v_next, dtype=jnp.float32),
+        jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
+        jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
+    )
+
     x = _gpu_cont_project(x, lb, ub, b, c_lb, c_ub, buy_or_zero)
     for _ in range(int(maxiter)):
-        g = _gpu_cont_grad(x, lb, ub, b, c_lb, c_ub, buy_or_zero, aux_params, float(thecash), float(thehouse))
+        g = _gpu_cont_grad(x, lb, ub, b, c_lb, c_ub, buy_or_zero, thecash32, thehouse32, *aux_args)
         x = _gpu_cont_project(x - float(step_size) * g, lb, ub, b, c_lb, c_ub, buy_or_zero)
 
-    fval = float(np.asarray(_gpu_cont_obj(x, lb, ub, b, c_lb, c_ub, buy_or_zero, aux_params, float(thecash), float(thehouse))))
+    fval = float(np.asarray(_gpu_cont_obj(x, lb, ub, b, c_lb, c_ub, buy_or_zero, thecash32, thehouse32, *aux_args)))
     x_np = np.asarray(_gpu_cont_project(x, lb, ub, b, c_lb, c_ub, buy_or_zero), dtype=float)
     return float(x_np[0]), float(x_np[1]), float(x_np[2]), float(-fval)
 
