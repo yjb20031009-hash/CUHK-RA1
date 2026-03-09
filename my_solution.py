@@ -60,7 +60,6 @@ def run_my_solution(
     moments_high_path: str = "Sample_did_nosample_high.mat",
     moments_low_path: str = "Sample_did_nosample_low.mat",
     run_quick_test: bool = True,
-    quick_recompute_policy: bool = True,
     xla_gpu_autotune_level: int | None = None,
     run_5param: bool = True,
     run_7param: bool = True,
@@ -82,7 +81,6 @@ def run_my_solution(
         quick_test_value, _, _ = my_estimation_prepostdid1_high(
             quick_eval_param,
             moments_path=moments_high_path,
-            recompute_policy=quick_recompute_policy,
         )
 
     if run_5param:
