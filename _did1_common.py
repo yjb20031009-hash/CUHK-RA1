@@ -81,9 +81,6 @@ def run_variant(
     use_sim_data: bool,
     recompute_policy: bool,
     moments_path: str | None = None,
-    solver_mode: str | None = None,
-    continuous_maxiter: int | None = None,
-    continuous_ftol: float | None = None,
 ):
     p5, mu, muh = normalize_params(
         myparam,
@@ -96,13 +93,6 @@ def run_variant(
     # IMPORTANT: temporary filtered sample file usually contains only `mySample`,
     # so DID moments must come from a dedicated moments file.
     resolved_moments_path = moments_path or _default_moments_path(fl_filter)
-
-    if solver_mode is not None:
-        cfg = replace(cfg, solver_mode=solver_mode)
-    if continuous_maxiter is not None:
-        cfg = replace(cfg, continuous_maxiter=int(continuous_maxiter))
-    if continuous_ftol is not None:
-        cfg = replace(cfg, continuous_ftol=float(continuous_ftol))
 
     tmp = _with_filtered_sample(sample_prepost_path, fl_filter)
     try:

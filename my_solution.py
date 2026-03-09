@@ -64,9 +64,6 @@ def run_my_solution(
     quick_x0: np.ndarray | None = None,
     quick_sigma0: np.ndarray | None = None,
     quick_recompute_policy: bool = True,
-    quick_solver_mode: str | None = None,
-    quick_continuous_maxiter: int | None = None,
-    quick_continuous_ftol: float | None = None,
     xla_gpu_autotune_level: int | None = None,
     run_5param: bool = True,
     run_7param: bool = True,
@@ -91,9 +88,6 @@ def run_my_solution(
             quick_eval_param,
             moments_path=moments_high_path,
             recompute_policy=quick_recompute_policy,
-            solver_mode=quick_solver_mode,
-            continuous_maxiter=quick_continuous_maxiter,
-            continuous_ftol=quick_continuous_ftol,
         )
 
         if optimize_quick_test:
@@ -106,9 +100,6 @@ def run_my_solution(
                 opts,
                 moments_path=moments_high_path,
                 recompute_policy=quick_recompute_policy,
-                solver_mode=quick_solver_mode,
-                continuous_maxiter=quick_continuous_maxiter,
-                continuous_ftol=quick_continuous_ftol,
             )
 
     if run_5param:
