@@ -60,9 +60,6 @@ def run_my_solution(
     moments_high_path: str = "Sample_did_nosample_high.mat",
     moments_low_path: str = "Sample_did_nosample_low.mat",
     run_quick_test: bool = True,
-    optimize_quick_test: bool = False,
-    quick_x0: np.ndarray | None = None,
-    quick_sigma0: np.ndarray | None = None,
     quick_recompute_policy: bool = True,
     xla_gpu_autotune_level: int | None = None,
     run_5param: bool = True,
@@ -79,28 +76,14 @@ def run_my_solution(
     quick_test_value: float | None = None
 
     if run_quick_test:
-        quick_eval_param = (
-            np.asarray(quick_x0, dtype=float)
-            if quick_x0 is not None
-            else np.array([0.2090, 0.11054, 0.6103, 0.9940, 0.9885, 0.3096, 0.3269, 0.2], dtype=float)
-        )
+        # Keep MATLAB semantics for quick test: single objective evaluation
+        # at a fixed parameter vector (no outer CMA-ES call here).
+        quick_eval_param = np.array([0.2090, 0.11054, 0.6103, 0.9940, 0.9885, 0.3096, 0.3269, 0.2], dtype=float)
         quick_test_value, _, _ = my_estimation_prepostdid1_high(
             quick_eval_param,
             moments_path=moments_high_path,
             recompute_policy=quick_recompute_policy,
         )
-
-        if optimize_quick_test:
-            qx0 = quick_eval_param
-            qsig = np.asarray(quick_sigma0, dtype=float) if quick_sigma0 is not None else np.full_like(qx0, 0.1)
-            optimized["quick_test_high_opt"] = _run_one(
-                my_estimation_prepostdid1_high,
-                qx0,
-                qsig,
-                opts,
-                moments_path=moments_high_path,
-                recompute_policy=quick_recompute_policy,
-            )
 
     if run_5param:
         optimized["did1_5param_full"] = _run_one(
