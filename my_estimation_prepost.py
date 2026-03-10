@@ -15,11 +15,9 @@ from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-import jax.numpy as jnp
 import numpy as np
 from scipy.io import loadmat, savemat
 
-from .interp2 import interp2_regular
 from .mymain_se import FixedParams, GridCfg, mymain_se
 from .tauchen_hussey import tauchen_hussey
 
@@ -52,6 +50,8 @@ class EstimationConfig:
     discrete_nh2: int = 9
     continuous_maxiter: int = 80
     continuous_ftol: float = 1e-6
+    continuous_constraint_tol: float | None = 1e-2
+    interp_method: str = "linear"
     corr_hs: float = -0.08
     r: float = 1.05 - 0.048
     mu: float = 0.08
@@ -134,17 +134,57 @@ def build_return_process(cfg: EstimationConfig, tauchen_fn: Callable[..., tuple[
     return gret_sh
 
 
+def _interp_policy_vector_np(
+    gcash: np.ndarray,
+    ghouse: np.ndarray,
+    p: np.ndarray,
+    house: np.ndarray,
+    cash: np.ndarray,
+    mode: str = "linear",
+) -> np.ndarray:
+    """Fast NumPy interpolation on regular grid for 1D query vectors."""
+    xg = np.asarray(ghouse, dtype=float).reshape(-1)
+    yg = np.asarray(gcash, dtype=float).reshape(-1)
+    v = np.asarray(p, dtype=float)
+
+    xq = np.asarray(house, dtype=float).reshape(-1)
+    yq = np.asarray(cash, dtype=float).reshape(-1)
+
+    xq = np.clip(xq, xg[0], xg[-1])
+    yq = np.clip(yq, yg[0], yg[-1])
+
+    if mode == "nearest":
+        ix_r = np.clip(np.searchsorted(xg, xq, side="left"), 0, xg.size - 1)
+        iy_r = np.clip(np.searchsorted(yg, yq, side="left"), 0, yg.size - 1)
+        ix_l = np.maximum(ix_r - 1, 0)
+        iy_l = np.maximum(iy_r - 1, 0)
+        ix = np.where(np.abs(xq - xg[ix_l]) <= np.abs(xq - xg[ix_r]), ix_l, ix_r)
+        iy = np.where(np.abs(yq - yg[iy_l]) <= np.abs(yq - yg[iy_r]), iy_l, iy_r)
+        return v[iy, ix]
+
+    ix = np.clip(np.searchsorted(xg, xq, side="right") - 1, 0, xg.size - 2)
+    iy = np.clip(np.searchsorted(yg, yq, side="right") - 1, 0, yg.size - 2)
+
+    x0 = xg[ix]
+    x1 = xg[ix + 1]
+    y0 = yg[iy]
+    y1 = yg[iy + 1]
+
+    tx = np.where(x1 > x0, (xq - x0) / (x1 - x0), 0.0)
+    ty = np.where(y1 > y0, (yq - y0) / (y1 - y0), 0.0)
+
+    v00 = v[iy, ix]
+    v10 = v[iy, ix + 1]
+    v01 = v[iy + 1, ix]
+    v11 = v[iy + 1, ix + 1]
+
+    v0 = v00 * (1.0 - tx) + v10 * tx
+    v1 = v01 * (1.0 - tx) + v11 * tx
+    return v0 * (1.0 - ty) + v1 * ty
+
+
 def _interp_policy_scalar(gcash: np.ndarray, ghouse: np.ndarray, p: np.ndarray, house: float, cash: float, mode: str = "linear") -> float:
-    out = interp2_regular(
-        jnp.asarray(ghouse.reshape(-1)),
-        jnp.asarray(gcash.reshape(-1)),
-        jnp.asarray(p),
-        jnp.asarray(house),
-        jnp.asarray(cash),
-        method="nearest" if mode == "nearest" else "linear",
-        bounds="clip",
-    )
-    return float(out)
+    return float(_interp_policy_vector_np(gcash, ghouse, p, np.array([house]), np.array([cash]), mode=mode)[0])
 
 
 def simulate_one_step(*, t_mat: int, initial_ipart: int, cash0: float, house0: float, gcash: np.ndarray, ghouse: np.ndarray, C: np.ndarray, A: np.ndarray, H: np.ndarray, C1: np.ndarray, A1: np.ndarray, H1: np.ndarray, ppt: float, adjcost: float, otcost_t: float, ppcost_t: float, minhouse2_t: float, gyp_t: float, gret_sh: np.ndarray, r: float) -> dict[str, Any]:
@@ -380,6 +420,8 @@ def my_estimation_prepost(
                 solver_mode=cfg.solver_mode,
                 continuous_maxiter=cfg.continuous_maxiter,
                 continuous_ftol=cfg.continuous_ftol,
+                continuous_constraint_tol=cfg.continuous_constraint_tol,
+                interp_method=cfg.interp_method,
             )
             C, A, H = map(_coerce_policy_shape, (np.asarray(C), np.asarray(A), np.asarray(H)))
             C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(C1), np.asarray(A1), np.asarray(H1)))
@@ -405,100 +447,95 @@ def my_estimation_prepost(
         simCp1 = np.zeros((l, nn))
         simAp1 = np.zeros((l, nn))
 
-        for i in range(l):
-            t_mat = int(initialAge[i])
-            cash0 = float(initialW[i] + (cfg.ret_fac if (t_mat > (tr - tb)) else 1.0))
-            house0 = float(initialH[i])
-            out = simulate_one_step(
-                t_mat=t_mat,
-                initial_ipart=int(initialIpart[i]),
-                cash0=cash0,
-                house0=house0,
-                gcash=gcash,
-                ghouse=ghouse,
-                C=C,
-                A=A,
-                H=H,
-                C1=C1,
-                A1=A1,
-                H1=H1,
-                ppt=ppt,
-                adjcost=cfg.adjcost,
-                otcost_t=float(otcost_t[t_mat - 1]),
-                ppcost_t=float(ppcost_t[t_mat - 1]),
-                minhouse2_t=float(minhouse2_t[t_mat - 1]),
-                gyp_t=float(gyp[t_mat - 1]),
-                gret_sh=gret_sh,
-                r=cfg.r,
-            )
-            simW[i, :], simH2[i, :], simI[i, 0] = out["simW"], out["simH2"], out["simI"]
+        # 分层矢量化（第1层）：按 (initialIpart, t_mat) 分组批量插值，替代逐样本 simulate_one_step 调用
+        t_vec = initialAge.astype(int)
+        cash0_all = initialW + np.where(t_vec > (tr - tb), cfg.ret_fac, 1.0)
+        house0_all = initialH
 
-            t1_mat = min(int(initialAge[i] + 1), C.shape[2])
-            cash1 = simW[i, :] + (cfg.ret_fac if (t1_mat > (tr - tb)) else 1.0)
-            house1 = simH2[i, :]
+        simC = np.zeros(l, dtype=float)
+        simA = np.zeros(l, dtype=float)
+        simH = np.zeros(l, dtype=float)
+        simAa = np.zeros(l, dtype=float)
 
-            # 向量化 shock 维度插值，避免逐 k Python 循环带来的 host/device 开销
-            if simI[i, 0] == 0:
-                simCp1_i = interp2_regular(
-                    jnp.asarray(ghouse.reshape(-1)),
-                    jnp.asarray(gcash.reshape(-1)),
-                    jnp.asarray(C1[:, :, t1_mat - 1]),
-                    jnp.asarray(house1),
-                    jnp.asarray(cash1),
-                    method="linear",
-                    bounds="clip",
-                )
-                simAp1_i = interp2_regular(
-                    jnp.asarray(ghouse.reshape(-1)),
-                    jnp.asarray(gcash.reshape(-1)),
-                    jnp.asarray(A1[:, :, t1_mat - 1]),
-                    jnp.asarray(house1),
-                    jnp.asarray(cash1),
-                    method="linear",
-                    bounds="clip",
-                )
-                simAa_i = interp2_regular(
-                    jnp.asarray(ghouse.reshape(-1)),
-                    jnp.asarray(gcash.reshape(-1)),
-                    jnp.asarray(A1[:, :, t1_mat - 1]),
-                    jnp.asarray(house1),
-                    jnp.asarray(cash1),
-                    method="nearest",
-                    bounds="clip",
-                )
-            else:
-                simCp1_i = interp2_regular(
-                    jnp.asarray(ghouse.reshape(-1)),
-                    jnp.asarray(gcash.reshape(-1)),
-                    jnp.asarray(C[:, :, t1_mat - 1]),
-                    jnp.asarray(house1),
-                    jnp.asarray(cash1),
-                    method="linear",
-                    bounds="clip",
-                )
-                simAp1_i = interp2_regular(
-                    jnp.asarray(ghouse.reshape(-1)),
-                    jnp.asarray(gcash.reshape(-1)),
-                    jnp.asarray(A[:, :, t1_mat - 1]),
-                    jnp.asarray(house1),
-                    jnp.asarray(cash1),
-                    method="linear",
-                    bounds="clip",
-                )
-                simAa_i = interp2_regular(
-                    jnp.asarray(ghouse.reshape(-1)),
-                    jnp.asarray(gcash.reshape(-1)),
-                    jnp.asarray(A[:, :, t1_mat - 1]),
-                    jnp.asarray(house1),
-                    jnp.asarray(cash1),
-                    method="nearest",
-                    bounds="clip",
-                )
+        for ipart_val in (0, 1):
+            ip_mask = (initialIpart == ipart_val)
+            if not np.any(ip_mask):
+                continue
+            unique_t = np.unique(t_vec[ip_mask])
+            for t_mat in unique_t:
+                grp = ip_mask & (t_vec == t_mat)
+                idx = np.where(grp)[0]
+                if idx.size == 0:
+                    continue
 
-            simCp1[i, :] = np.asarray(simCp1_i, dtype=float)
-            simAp1_i = np.asarray(simAp1_i, dtype=float)
-            simAa_i = np.asarray(simAa_i, dtype=float)
-            simAp1[i, :] = np.where(simAa_i == 0.0, 0.0, simAp1_i)
+                t0 = int(t_mat - 1)
+                c_pol = C1[:, :, t0] if ipart_val == 0 else C[:, :, t0]
+                a_pol = A1[:, :, t0] if ipart_val == 0 else A[:, :, t0]
+                h_pol = H1[:, :, t0] if ipart_val == 0 else H[:, :, t0]
+
+                hq = house0_all[idx]
+                cq = cash0_all[idx]
+
+                simC[idx] = _interp_policy_vector_np(gcash, ghouse, c_pol, hq, cq, mode="linear")
+                simA[idx] = _interp_policy_vector_np(gcash, ghouse, a_pol, hq, cq, mode="linear")
+                simH[idx] = _interp_policy_vector_np(gcash, ghouse, h_pol, hq, cq, mode="linear")
+                simAa[idx] = _interp_policy_vector_np(gcash, ghouse, a_pol, hq, cq, mode="nearest")
+
+        simA = np.where(simAa == 0.0, 0.0, simA)
+        simI[:, 0] = (((initialIpart == 0) & (simA > 0.0)) | (initialIpart == 1)).astype(int)
+
+        minhouse2_vec = minhouse2_t[t_vec - 1]
+        keep_house = (np.abs(simH - house0_all) <= 0.05 * house0_all) | ((house0_all == 0.0) & (simH < minhouse2_vec * 0.9))
+        simH = np.where(keep_house, house0_all, simH)
+        bump_min_house = (house0_all == 0.0) & (simH < minhouse2_vec) & (simH >= minhouse2_vec * 0.9)
+        simH = np.where(bump_min_house, minhouse2_vec, simH)
+
+        con1 = (simH == house0_all).astype(float)
+        con2 = ((simI[:, 0] - initialIpart) == 1).astype(float)
+        con3 = (simA > 0.0).astype(float)
+
+        otcost_vec = otcost_t[t_vec - 1]
+        ppcost_vec = ppcost_t[t_vec - 1]
+        gyp_vec = gyp[t_vec - 1]
+
+        simS = cash0_all + house0_all * (1.0 - ppt - (1.0 - con1) * cfg.adjcost) - simC - simH - con2 * otcost_vec - con3 * ppcost_vec
+
+        stock_ret = gret_sh[:, 0]
+        house_gross = gret_sh[:, 1]
+        simW[:, :] = (simS[:, None] * simA[:, None] * stock_ret[None, :] + simS[:, None] * (1.0 - simA[:, None]) * cfg.r) / gyp_vec[:, None]
+        simH2[:, :] = (simH[:, None] * house_gross[None, :]) / gyp_vec[:, None]
+
+        simW[:, :] = np.minimum(simW, 40.0)
+        simH2[:, :] = np.minimum(simH2, 40.0)
+
+        # 批量做 t+1 插值：按 (t1_mat, simI) 分组，避免在 i 循环中频繁调用插值核
+        t1_vec = np.minimum(initialAge + 1, C.shape[2]).astype(int)
+        cash1_all = simW + np.where(t1_vec[:, None] > (tr - tb), cfg.ret_fac, 1.0)
+        house1_all = simH2
+
+        for ipart_val in (0, 1):
+            ip_mask = (simI[:, 0] == ipart_val)
+            if not np.any(ip_mask):
+                continue
+            unique_t1 = np.unique(t1_vec[ip_mask])
+            for t1_mat in unique_t1:
+                grp = ip_mask & (t1_vec == t1_mat)
+                idx = np.where(grp)[0]
+                if idx.size == 0:
+                    continue
+
+                c_pol = C1[:, :, t1_mat - 1] if ipart_val == 0 else C[:, :, t1_mat - 1]
+                a_pol = A1[:, :, t1_mat - 1] if ipart_val == 0 else A[:, :, t1_mat - 1]
+
+                hq = house1_all[idx, :].reshape(-1)
+                cq = cash1_all[idx, :].reshape(-1)
+
+                cp = _interp_policy_vector_np(gcash, ghouse, c_pol, hq, cq, mode="linear").reshape(idx.size, nn)
+                ap = _interp_policy_vector_np(gcash, ghouse, a_pol, hq, cq, mode="linear").reshape(idx.size, nn)
+                aa = _interp_policy_vector_np(gcash, ghouse, a_pol, hq, cq, mode="nearest").reshape(idx.size, nn)
+
+                simCp1[idx, :] = cp
+                simAp1[idx, :] = np.where(aa == 0.0, 0.0, ap)
 
         return simW, simH2, simI, simCp1, simAp1
 

@@ -5,7 +5,7 @@ from .neural_network import (
     train_mlp,
     predict_mlp,
 )
-from .interp2 import interp2_regular, interp2_bilinear, interp2_nearest
+from .interp2 import interp2_regular, interp2_bilinear, interp2_nearest, interp2_cubic
 from .fmincon import fmincon, FminconResult
 from .my_auxv_cal import my_auxv_cal, AuxVParams
 from .mymain_se import mymain_se, GridCfg, LifeCfg, FixedParams
@@ -25,6 +25,7 @@ __all__ = [
     "interp2_regular",
     "interp2_bilinear",
     "interp2_nearest",
+    "interp2_cubic",
     "fmincon",
     "FminconResult",
     "my_auxv_cal",
