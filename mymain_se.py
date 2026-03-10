@@ -821,6 +821,10 @@ def mymain_se(
 
     tn = int(lcfg.td - lcfg.tb + 1)
     gcash, ghouse = _build_state_grids(fp, gcfg)
+    gcash_np = np.asarray(gcash, dtype=float)
+    ghouse_np = np.asarray(ghouse, dtype=float)
+    cash_min_grid, cash_max_grid = float(gcash_np[0]), float(gcash_np[-1])
+    house_min_grid, house_max_grid = float(ghouse_np[0]), float(ghouse_np[-1])
     survprob = _load_survprob(surv_mat_path)
 
     theta = (1.0 - rho) / (1.0 - 1.0 / psi)
@@ -902,13 +906,17 @@ def mymain_se(
             v_next=jnp.asarray(V_next_np),
             gcash_grid=jnp.asarray(gcash),
             ghouse_grid=jnp.asarray(ghouse),
+            cash_min=cash_min_grid,
+            cash_max=cash_max_grid,
+            house_min=house_min_grid,
+            house_max=house_max_grid,
             interp_method=interp_method,
         )
         model_fn_np = None
         if build_model_fn:
             vnp = np.asarray(V_next_np, dtype=float)
-            gc = np.asarray(gcash, dtype=float)
-            gh = np.asarray(ghouse, dtype=float)
+            gc = gcash_np
+            gh = ghouse_np
             if interp_method in {"spline", "cubic"}:
                 model_fn_np = _build_model_fn_spline(vnp, gc, gh)
             else:
@@ -1291,14 +1299,14 @@ def mymain_se(
             if interp_method in {"spline", "cubic"}:
                 model_nopay_np = _build_model_fn_spline(
                     np.asarray(V1[:, :, t + 1], dtype=float),
-                    np.asarray(gcash, dtype=float),
-                    np.asarray(ghouse, dtype=float),
+                    gcash_np,
+                    ghouse_np,
                 )
             else:
                 model_nopay_np = _build_model_fn_linear_np(
                     np.asarray(V1[:, :, t + 1], dtype=float),
-                    np.asarray(gcash, dtype=float),
-                    np.asarray(ghouse, dtype=float),
+                    gcash_np,
+                    ghouse_np,
                     method=interp_method,
                 )
 
