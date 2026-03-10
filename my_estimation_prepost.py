@@ -51,6 +51,7 @@ class EstimationConfig:
     continuous_maxiter: int = 80
     continuous_ftol: float = 1e-6
     continuous_constraint_tol: float | None = 1e-2
+    interp_method: str = "linear"
     corr_hs: float = -0.08
     r: float = 1.05 - 0.048
     mu: float = 0.08
@@ -420,6 +421,7 @@ def my_estimation_prepost(
                 continuous_maxiter=cfg.continuous_maxiter,
                 continuous_ftol=cfg.continuous_ftol,
                 continuous_constraint_tol=cfg.continuous_constraint_tol,
+                interp_method=cfg.interp_method,
             )
             C, A, H = map(_coerce_policy_shape, (np.asarray(C), np.asarray(A), np.asarray(H)))
             C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(C1), np.asarray(A1), np.asarray(H1)))

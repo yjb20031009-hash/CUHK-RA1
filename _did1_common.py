@@ -122,6 +122,7 @@ def base_cfg(**kwargs) -> EstimationConfig:
         nh=11,
         solver_mode="gpu_continuous",
         continuous_constraint_tol=1e-2,
+        interp_method="linear",
     )
     if kwargs:
         cfg = replace(cfg, **kwargs)

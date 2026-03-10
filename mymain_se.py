@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.io import loadmat
-from scipy.interpolate import RectBivariateSpline
+from scipy.interpolate import RectBivariateSpline, RegularGridInterpolator
 from scipy.optimize import minimize  # kept for other potential uses
 
 # Import fmincon for MATLAB-like nonlinear optimization
@@ -147,14 +147,39 @@ def _income_growth(fp: FixedParams, lcfg: LifeCfg, t: int) -> tuple[float, float
     return 1.0, float(np.exp((f_y1 + f_y1_2) / (f_y2 + f_y2_2) - 1.0))
 
 
-def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray) -> Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray, interp_method: str = "linear") -> Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """把下一期价值函数数组封装成可调用 model_fn(housing, cash)。"""
     from interp2 import interp2_regular
 
     def model_fn(housing_nn: jnp.ndarray, cash_nn: jnp.ndarray) -> jnp.ndarray:
         # 注意插值轴：x=ghouse, y=gcash, V shape=(len(y), len(x))
         # v_next 在本实现中已是 (ncash, nh) = (len(gcash), len(ghouse))，不应再转置。
-        return interp2_regular(ghouse, gcash, v_next, housing_nn, cash_nn, method="linear", bounds="clip")
+        return interp2_regular(ghouse, gcash, v_next, housing_nn, cash_nn, method=interp_method, bounds="clip")
+
+    return model_fn
+
+
+
+
+def _build_model_fn_linear_np(v_next_np: np.ndarray, gcash_np: np.ndarray, ghouse_np: np.ndarray, method: str = "linear") -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """Build a regular-grid linear/nearest interpolator for NumPy paths."""
+    rgi = RegularGridInterpolator(
+        (gcash_np, ghouse_np),
+        v_next_np,
+        method=method,
+        bounds_error=False,
+        fill_value=np.nan,
+    )
+
+    def model_fn(housing_nn: np.ndarray, cash_nn: np.ndarray) -> np.ndarray:
+        h = np.asarray(housing_nn, dtype=float)
+        c = np.asarray(cash_nn, dtype=float)
+        c, h = np.broadcast_arrays(c, h)
+        c = np.clip(c, gcash_np[0], gcash_np[-1])
+        h = np.clip(h, ghouse_np[0], ghouse_np[-1])
+        pts = np.column_stack([c.ravel(), h.ravel()])
+        out = rgi(pts)
+        return np.asarray(out).reshape(c.shape)
 
     return model_fn
 
@@ -772,6 +797,7 @@ def mymain_se(
     continuous_maxiter: int = 80,
     continuous_ftol: float = 1e-6,
     continuous_constraint_tol: float | None = 1e-2,
+    interp_method: str = "linear",
     surv_mat_path: str = "surv.mat",
 ):
     """主求解函数，对应 MATLAB `mymain_se`。
@@ -788,6 +814,10 @@ def mymain_se(
         solver_mode = "discrete"
     elif solver_mode not in {"discrete", "continuous", "gpu_continuous"}:
         raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous', 'gpu_continuous'}")
+
+    interp_method = interp_method.lower()
+    if interp_method not in {"linear", "nearest", "cubic", "spline"}:
+        raise ValueError("interp_method must be one of {'linear', 'nearest', 'cubic', 'spline'}")
 
     tn = int(lcfg.td - lcfg.tb + 1)
     gcash, ghouse = _build_state_grids(fp, gcfg)
@@ -872,14 +902,17 @@ def mymain_se(
             v_next=jnp.asarray(V_next_np),
             gcash_grid=jnp.asarray(gcash),
             ghouse_grid=jnp.asarray(ghouse),
+            interp_method=interp_method,
         )
         model_fn_np = None
         if build_model_fn:
-            model_fn_np = _build_model_fn_spline(
-                np.asarray(V_next_np, dtype=float),
-                np.asarray(gcash, dtype=float),
-                np.asarray(ghouse, dtype=float),
-            )
+            vnp = np.asarray(V_next_np, dtype=float)
+            gc = np.asarray(gcash, dtype=float)
+            gh = np.asarray(ghouse, dtype=float)
+            if interp_method in {"spline", "cubic"}:
+                model_fn_np = _build_model_fn_spline(vnp, gc, gh)
+            else:
+                model_fn_np = _build_model_fn_linear_np(vnp, gc, gh, method=interp_method)
         return aux_params, model_fn_np, minhouse2
 
     cash_mesh, house_mesh = jnp.meshgrid(gcash, ghouse, indexing="ij")
@@ -1255,11 +1288,19 @@ def mymain_se(
         )
         model_nopay_np = None
         if solver_mode == "continuous":
-            model_nopay_np = _build_model_fn_spline(
-                np.asarray(V1[:, :, t + 1], dtype=float),
-                np.asarray(gcash, dtype=float),
-                np.asarray(ghouse, dtype=float),
-            )
+            if interp_method in {"spline", "cubic"}:
+                model_nopay_np = _build_model_fn_spline(
+                    np.asarray(V1[:, :, t + 1], dtype=float),
+                    np.asarray(gcash, dtype=float),
+                    np.asarray(ghouse, dtype=float),
+                )
+            else:
+                model_nopay_np = _build_model_fn_linear_np(
+                    np.asarray(V1[:, :, t + 1], dtype=float),
+                    np.asarray(gcash, dtype=float),
+                    np.asarray(ghouse, dtype=float),
+                    method=interp_method,
+                )
 
         if solver_mode == "continuous":
             # Flatten state loop and unify pay/nopay candidate evaluation.
