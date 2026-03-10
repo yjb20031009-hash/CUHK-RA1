@@ -543,14 +543,14 @@ def _gpu_cont_obj_one(
 _gpu_cont_grad_batch = jax.jit(
     jax.vmap(
         _gpu_cont_grad_one,
-        in_axes=(0, 0, 0, 0, 0, 0, None, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
+        in_axes=(0, 0, 0, 0, 0, 0, None, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
     )
 )
 
 _gpu_cont_obj_batch = jax.jit(
     jax.vmap(
         _gpu_cont_obj_one,
-        in_axes=(0, 0, 0, 0, 0, 0, None, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
+        in_axes=(0, 0, 0, 0, 0, 0, None, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
     )
 )
 
