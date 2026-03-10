@@ -211,9 +211,17 @@ def _my_auxv_cal_np(
 
     cash_nn = np.clip(cash_nn, p.cash_min, p.cash_max)
     int_v = model_fn_np(housing_nn, cash_nn)
+    eps = 1e-8
+    int_v = np.where(np.isfinite(int_v), int_v, eps)
+    int_v = np.maximum(int_v, eps)
     surv = float(np.asarray(p.survprob)[p.t] if np.asarray(p.survprob).ndim == 1 else np.asarray(p.survprob)[p.t, 0])
     aux_vv = float(weights @ (int_v ** (1.0 - p.rho))) * surv
-    return -((u + p.delta * (aux_vv ** (1.0 / p.theta))) ** p.psi_2)
+    if not np.isfinite(aux_vv) or aux_vv <= eps:
+        aux_vv = eps
+    core = u + p.delta * (aux_vv ** (1.0 / p.theta))
+    if not np.isfinite(core) or core <= eps:
+        core = eps
+    return -(core ** p.psi_2)
 
 
 
@@ -611,7 +619,10 @@ def _gpu_cont_batch_optimize(
 
     def _iter_body(_i, x_curr):
         g = grad_vmap(x_curr)
-        return proj_vmap(x_curr - step_size * g, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
+        g = jnp.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
+        x_next = x_curr - step_size * g
+        x_next = jnp.nan_to_num(x_next, nan=0.25, posinf=0.25, neginf=0.25)
+        return proj_vmap(x_next, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
 
     x1 = jax.lax.fori_loop(0, maxiter, _iter_body, x0)
     vals = obj_vmap(x1)

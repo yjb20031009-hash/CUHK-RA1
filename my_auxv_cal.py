@@ -114,11 +114,19 @@ def _my_auxv_cal_jit(
     cash_nn = jnp.clip(cash_nn, cash_min, cash_max)
 
     int_v = interp2_regular(ghouse_grid, gcash_grid, v_next, housing_nn, cash_nn, method="linear", bounds="clip")
+    eps = jnp.asarray(1e-8, dtype=jnp.float32)
+    int_v = jnp.where(jnp.isfinite(int_v), int_v, eps)
+    int_v = jnp.maximum(int_v, eps)
     weights = gret_sh[:, 2]
     surv = survprob[t] if survprob.ndim == 1 else survprob[t, 0]
 
     aux_vv = (weights @ (int_v ** (1.0 - rho))) * surv
-    return -((u + delta * (aux_vv ** (1.0 / theta))) ** psi_2)
+    aux_vv = jnp.where(jnp.isfinite(aux_vv), aux_vv, eps)
+    aux_vv = jnp.maximum(aux_vv, eps)
+    core = u + delta * (aux_vv ** (1.0 / theta))
+    core = jnp.where(jnp.isfinite(core), core, eps)
+    core = jnp.maximum(core, eps)
+    return -(core ** psi_2)
 
 
 def my_auxv_cal(myinput: jnp.ndarray, p: AuxVParams, thecash: float, thehouse: float) -> jnp.ndarray:
