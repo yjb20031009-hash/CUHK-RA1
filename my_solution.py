@@ -75,8 +75,11 @@ def run_my_solution(
     quick_test_value: float | None = None
 
     if run_quick_test:
+        # Keep MATLAB semantics for quick test: single objective evaluation
+        # at a fixed parameter vector (no outer CMA-ES call here).
+        quick_eval_param = np.array([0.2090, 0.11054, 0.6103, 0.9940, 0.9885, 0.3096, 0.3269, 0.2], dtype=float)
         quick_test_value, _, _ = my_estimation_prepostdid1_high(
-            np.array([0.2090, 0.11054, 0.6103, 0.9940, 0.9885, 0.3096, 0.3269, 0.2]),
+            quick_eval_param,
             moments_path=moments_high_path,
         )
 
