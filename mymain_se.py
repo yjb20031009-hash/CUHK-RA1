@@ -373,7 +373,8 @@ def _solve_one_state_continuous(
     constraint_tol: float | None = None,
 ) -> tuple[float, float, float, float]:
     """Continuous per-state solve using MATLAB-like fmincon wrapper."""
-    del model_fn_np
+    if model_fn_np is None:
+        raise ValueError("continuous mode requires model_fn_np interpolator")
     if b < 0.25:
         return 0.25, 0.0, 0.0, -np.inf
     if h_mode == "buy" and b < (0.25 + float(minhouse2)):
@@ -411,7 +412,37 @@ def _solve_one_state_continuous(
         xo[2] = np.clip(xo[2], h_lb, h_ub)
         x0 = xo
 
-    obj_fun, jac_fun = _build_continuous_obj_and_jac(aux_params, thecash, thehouse)
+    def obj_fun(x: jnp.ndarray) -> float:
+        return float(
+            _my_auxv_cal_np(
+                np.asarray(x, dtype=float),
+                aux_params,
+                float(thecash),
+                float(thehouse),
+                model_fn_np,
+            )
+        )
+
+    def jac_fun(x: np.ndarray) -> np.ndarray:
+        x0_local = np.asarray(x, dtype=float).reshape(3)
+        # MATLAB fmincon + spline path does not use AD gradients on the interpolant;
+        # use robust central finite-difference to mirror that behavior.
+        eps_base = 1e-5
+        g = np.zeros_like(x0_local)
+        for i in range(x0_local.size):
+            h = eps_base * max(1.0, abs(x0_local[i]))
+            xp = x0_local.copy()
+            xm = x0_local.copy()
+            xp[i] = min(xp[i] + h, [c_ub, a_ub, h_ub][i])
+            xm[i] = max(xm[i] - h, [c_lb, a_lb, h_lb][i])
+            span = xp[i] - xm[i]
+            if span <= 0:
+                g[i] = 0.0
+                continue
+            fp = obj_fun(xp)
+            fm = obj_fun(xm)
+            g[i] = (fp - fm) / span
+        return g
 
     # Linear constraints for SciPy SLSQP / fmincon wrapper:
     # buy/zero: c + h <= b ; keep: c <= b
