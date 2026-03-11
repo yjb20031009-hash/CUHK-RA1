@@ -413,15 +413,25 @@ def _solve_one_state_continuous(
 
     obj_fun, jac_fun = _build_continuous_obj_and_jac(aux_params, thecash, thehouse)
 
-    def nonlcon(x):
-        c = jnp.asarray(x[0], dtype=jnp.float32)
-        h = jnp.asarray(x[2], dtype=jnp.float32)
-        bb = jnp.asarray(b, dtype=jnp.float32)
-        if buy_or_zero:
-            cin = c + h - bb
-        else:
-            cin = c - bb
-        return jnp.asarray([cin], dtype=jnp.float32), jnp.asarray([], dtype=jnp.float32)
+    # Linear constraints for SciPy SLSQP / fmincon wrapper:
+    # buy/zero: c + h <= b ; keep: c <= b
+    if buy_or_zero:
+        A = np.array([[1.0, 0.0, 1.0]], dtype=float)
+    else:
+        A = np.array([[1.0, 0.0, 0.0]], dtype=float)
+    bvec = np.array([float(b)], dtype=float)
+
+    # Keep/zero modes are fixed-housing by bounds already; pass explicit
+    # equality constraints as well to mirror MATLAB-style API usage.
+    if h_mode == "keep":
+        Aeq = np.array([[0.0, 0.0, 1.0]], dtype=float)
+        beq = np.array([float(thehouse)], dtype=float)
+    elif h_mode == "zero":
+        Aeq = np.array([[0.0, 0.0, 1.0]], dtype=float)
+        beq = np.array([0.0], dtype=float)
+    else:
+        Aeq = None
+        beq = None
 
     options = {
         "Algorithm": "sqp",
@@ -436,9 +446,12 @@ def _solve_one_state_continuous(
         res = fmincon(
             obj_fun,
             x0,
+            A=A,
+            b=bvec,
+            Aeq=Aeq,
+            beq=beq,
             lb=np.array([c_lb, a_lb, h_lb], dtype=float),
             ub=np.array([c_ub, a_ub, h_ub], dtype=float),
-            nonlcon=nonlcon,
             options=options,
             jac=jac_fun,
         )
