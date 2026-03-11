@@ -17,6 +17,7 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.io as sio
 from scipy.io import loadmat
 from scipy.interpolate import RectBivariateSpline, RegularGridInterpolator
 from scipy.optimize import minimize  # kept for other potential uses
@@ -568,14 +569,11 @@ def _gpu_cont_batch_optimize(
         )
 
     x0 = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
-    step_size = jnp.float32(0.04)
+    step_size = jnp.float32(0.001)
 
     def _iter_body(_i, x_curr):
         g = grad_vmap(x_curr)
-        g = jnp.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
-        x_next = x_curr - step_size * g
-        x_next = jnp.nan_to_num(x_next, nan=0.25, posinf=0.25, neginf=0.25)
-        return proj_vmap(x_next, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
+        return proj_vmap(x_curr - step_size * g, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
 
     x1 = jax.lax.fori_loop(0, maxiter, _iter_body, x0)
     vals = obj_vmap(x1)
@@ -593,7 +591,7 @@ def _solve_one_state_gpu_continuous(
     fp: FixedParams,
     minhouse2: float,
     x0_override: np.ndarray | None = None,
-    maxiter: int = 80,
+    maxiter: int = 1,
     step_size: float = 0.04,
 ) -> tuple[float, float, float, float]:
     """Projected gradient solver with JAX autodiff (continuous choices, GPU-friendly math path)."""
@@ -1132,6 +1130,21 @@ def mymain_se(
 
         H = jnp.where(H < 1e-3, 0.0, H)
         H1 = jnp.where(H1 < 1e-3, 0.0, H1)
+        try:
+            val_c = float(C[5, 3, 0])
+            val_a = float(A[5, 3, 0])
+            val_h = float(H[5, 3, 0])
+            print(f"\n>>> 最终决策比对 (idx: 5, 3, 0): myc={val_c:.8f}, mya={val_a:.8f}, myh={val_h:.8f}")
+        except Exception as e:
+            print(f"\n>>> 打印决策值失败: {e}")
+
+        save_data = {
+            "C_py": np.asarray(C),
+            "A_py": np.asarray(A),
+            "H_py": np.asarray(H),
+        }
+        sio.savemat("python_quick_test_result.mat", save_data)
+        print("\n>>> Python 决策矩阵已存入 python_quick_test_result.mat")
         return np.asarray(C), np.asarray(A), np.asarray(H), np.asarray(C1), np.asarray(A1), np.asarray(H1)
 
     # Loop 1: 已经支付过 one-time cost 的人群（批量化 state 维度）
