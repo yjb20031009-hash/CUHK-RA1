@@ -361,7 +361,7 @@ def _solve_one_state_continuous(
         beq = None
 
     options = {
-        "Algorithm": "sqp",
+        "Algorithm": "interior-point",
         "MaxIterations": int(maxiter),
         "OptimalityTolerance": float(ftol),
         "Display": False,

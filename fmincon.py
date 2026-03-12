@@ -181,7 +181,7 @@ def fmincon(
     options = options or {}
 
     method = options.get("Algorithm", "sqp").lower()
-    scipy_method = "SLSQP" if method in {"sqp", "active-set", "interior-point"} else "trust-constr"
+    scipy_method = "trust-constr" if method in {"interior-point", "trust-region-reflective"} else "SLSQP"
 
     if scipy_method == "SLSQP":
         constraints = _build_slsqp_constraints(A, b, Aeq, beq, nonlcon)
@@ -203,6 +203,19 @@ def fmincon(
     # using the tighter of optimality/constraint tolerances when both are provided.
     scipy_ftol = min(optimality_tol, constraint_tol) if constraint_tol is not None else optimality_tol
 
+    scipy_options = {
+        "maxiter": int(options.get("MaxIterations", options.get("MaxIter", 1000))),
+        "disp": bool(options.get("Display", False)),
+    }
+    if scipy_method == "SLSQP":
+        scipy_options["ftol"] = float(scipy_ftol)
+    else:
+        # trust-constr accepts separate stopping tolerances; map MATLAB-like
+        # optimality/constraint tolerances accordingly for interior-point behavior.
+        scipy_options["gtol"] = float(optimality_tol)
+        if constraint_tol is not None:
+            scipy_options["barrier_tol"] = float(constraint_tol)
+
     res: OptimizeResult = minimize(
         _wrap_fun(fun),
         x0,
@@ -210,11 +223,7 @@ def fmincon(
         jac=objective_jac,
         bounds=bounds,
         constraints=constraints,
-        options={
-            "maxiter": int(options.get("MaxIterations", options.get("MaxIter", 1000))),
-            "ftol": float(scipy_ftol),
-            "disp": bool(options.get("Display", False)),
-        },
+        options=scipy_options,
     )
 
     maxcv = _constraint_violation(np.asarray(res.x, dtype=float), A, b, Aeq, beq, nonlcon)
