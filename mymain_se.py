@@ -450,37 +450,13 @@ def _solve_one_state_continuous2(
         xo[2] = np.clip(xo[2], h_lb, h_ub)
         x0 = xo
 
-    # JAX objective/gradient path (GPU/CPU compatible), uses grid-interpolated V_next.
-    aux_args = (
-        jnp.asarray(aux_params.t, dtype=jnp.int32),
-        jnp.asarray(aux_params.rho, dtype=jnp.float32),
-        jnp.asarray(aux_params.delta, dtype=jnp.float32),
-        jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
-        jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
-        jnp.asarray(aux_params.theta, dtype=jnp.float32),
-        jnp.asarray(aux_params.gyp, dtype=jnp.float32),
-        jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
-        jnp.asarray(aux_params.ppt, dtype=jnp.float32),
-        jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
-        jnp.asarray(aux_params.otcost, dtype=jnp.float32),
-        jnp.asarray(aux_params.income, dtype=jnp.float32),
-        jnp.asarray(aux_params.survprob, dtype=jnp.float32),
-        jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
-        jnp.asarray(aux_params.r, dtype=jnp.float32),
-        jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
-        jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
-        jnp.asarray(aux_params.house_min, dtype=jnp.float32),
-        jnp.asarray(aux_params.house_max, dtype=jnp.float32),
-        jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
-        jnp.asarray(aux_params.v_next, dtype=jnp.float32),
-        jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
-        jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
-    )
     thecash_j = jnp.asarray(thecash, dtype=jnp.float32)
     thehouse_j = jnp.asarray(thehouse, dtype=jnp.float32)
 
     def _obj_jax(xv: jnp.ndarray) -> jnp.ndarray:
-        return _my_auxv_cal_jit(jnp.asarray(xv, dtype=jnp.float32), thecash_j, thehouse_j, *aux_args)
+        # _my_auxv_cal_jit has many keyword-only args; route through `my_auxv_cal`
+        # to keep signature aligned and avoid positional-argument mismatch.
+        return my_auxv_cal(jnp.asarray(xv, dtype=jnp.float32), aux_params, thecash_j, thehouse_j)
 
     grad_obj = jax.jit(jax.grad(_obj_jax))
 
