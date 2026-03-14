@@ -44,6 +44,7 @@ class EstimationConfig:
     ppt_post: float = 0.008
 
     n_shock_1d: int = 3
+    # Supported modes in `mymain_se`: gpu/discrete/continuous/continuous2/gpu_continuous.
     solver_mode: str = "gpu"
     discrete_na: int = 9
     discrete_nc: int = 5
@@ -304,6 +305,12 @@ def my_estimation_prepost(
     sim_sample_path: str = "sim_mySample2.mat",
     moments_path: str | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
+    allowed_solver_modes = {"gpu", "discrete", "continuous", "continuous2", "gpu_continuous"}
+    if cfg.solver_mode not in allowed_solver_modes:
+        raise ValueError(
+            f"cfg.solver_mode={cfg.solver_mode!r} is invalid; choose from {sorted(allowed_solver_modes)}"
+        )
+
     # === MATLAB section: 参数拆包 (ppcost, otcost, rho, delta, psi) ===
     myparam = np.asarray(myparam).reshape(-1)
     ppcost, otcost, rho, delta, psi = map(float, myparam[:5])
