@@ -13,8 +13,23 @@ def my_estimation_prepostdid1_high(
     use_sim_data: bool = False,
     recompute_policy: bool = True,
     moments_path: str = "Sample_did_nosample_high.mat",
+    solver_mode: str = "gpu_continuous",
+    continuous_maxiter: int = 80,
+    continuous_ftol: float = 1e-6,
+    continuous_constraint_tol: float | None = 1e-2,
+    interp_method: str = "linear",
 ):
-    cfg = base_cfg(incaa=9.88469, incb1=0.012571, incb2=-1.248147 / 1e4, incb3=0.0)
+    cfg = base_cfg(
+        incaa=9.88469,
+        incb1=0.012571,
+        incb2=-1.248147 / 1e4,
+        incb3=0.0,
+        solver_mode=solver_mode,
+        continuous_maxiter=continuous_maxiter,
+        continuous_ftol=continuous_ftol,
+        continuous_constraint_tol=continuous_constraint_tol,
+        interp_method=interp_method,
+    )
     return run_variant(
         myparam,
         cfg=cfg,
