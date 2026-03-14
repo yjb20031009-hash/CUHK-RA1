@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 from typing import Callable
 
 import jax
@@ -393,6 +394,154 @@ def _solve_one_state_continuous(
     return float(x_fb[0]), float(x_fb[1]), float(x_fb[2]), -np.inf
 
 
+def _solve_one_state_continuous2(
+    thecash: float,
+    thehouse: float,
+    aux_params: AuxVParams,
+    b: float,
+    h_mode: str,
+    can_participate: bool,
+    fp: FixedParams,
+    minhouse2: float,
+    x0_override: np.ndarray | None = None,
+    maxiter: int = 80,
+    ftol: float = 1e-6,
+    constraint_tol: float | None = None,
+) -> tuple[float, float, float, float]:
+    """Continuous per-state solve via CyIpopt (interior-point) + JAX gradients."""
+    if importlib.util.find_spec("cyipopt") is None:
+        raise ImportError("solver_mode='continuous2' requires cyipopt; please `pip install cyipopt`")
+    import cyipopt
+
+    if b < 0.25:
+        return 0.25, 0.0, 0.0, -np.inf
+    if h_mode == "buy" and b < (0.25 + float(minhouse2)):
+        return 0.25, 0.0, float(minhouse2), -np.inf
+
+    if h_mode == "keep":
+        h_lb, h_ub = float(thehouse), float(thehouse)
+        buy_or_zero = False
+    elif h_mode == "zero":
+        h_lb, h_ub = 0.0, 0.0
+        buy_or_zero = True
+    else:
+        h_lb, h_ub = float(minhouse2), float(fp.maxhouse)
+        buy_or_zero = True
+
+    if can_participate:
+        a_lb, a_ub = float(fp.minalpha), 1.0
+        a0 = max(a_lb, 0.2)
+    else:
+        a_lb, a_ub = 0.0, 0.0
+        a0 = 0.0
+
+    c_lb, c_ub = 0.25, max(float(b), 0.25)
+    h0 = h_lb if h_lb == h_ub else min(max(h_lb, minhouse2 if h_mode == "buy" else 0.0), h_ub)
+    if h_mode in {"buy", "zero"}:
+        c0 = min(max(c_lb, 0.5 * max(b - h0, c_lb)), c_ub)
+    else:
+        c0 = min(max(c_lb, 0.5 * max(b, c_lb)), c_ub)
+
+    x0 = np.array([c0, a0, h0], dtype=float)
+    if x0_override is not None:
+        xo = np.asarray(x0_override, dtype=float).reshape(3)
+        xo[0] = np.clip(xo[0], c_lb, c_ub)
+        xo[1] = np.clip(xo[1], a_lb, a_ub)
+        xo[2] = np.clip(xo[2], h_lb, h_ub)
+        x0 = xo
+
+    # JAX objective/gradient path (GPU/CPU compatible), uses grid-interpolated V_next.
+    aux_args = (
+        jnp.asarray(aux_params.t, dtype=jnp.int32),
+        jnp.asarray(aux_params.rho, dtype=jnp.float32),
+        jnp.asarray(aux_params.delta, dtype=jnp.float32),
+        jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
+        jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
+        jnp.asarray(aux_params.theta, dtype=jnp.float32),
+        jnp.asarray(aux_params.gyp, dtype=jnp.float32),
+        jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
+        jnp.asarray(aux_params.ppt, dtype=jnp.float32),
+        jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
+        jnp.asarray(aux_params.otcost, dtype=jnp.float32),
+        jnp.asarray(aux_params.income, dtype=jnp.float32),
+        jnp.asarray(aux_params.survprob, dtype=jnp.float32),
+        jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
+        jnp.asarray(aux_params.r, dtype=jnp.float32),
+        jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
+        jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
+        jnp.asarray(aux_params.house_min, dtype=jnp.float32),
+        jnp.asarray(aux_params.house_max, dtype=jnp.float32),
+        jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
+        jnp.asarray(aux_params.v_next, dtype=jnp.float32),
+        jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
+        jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
+    )
+    thecash_j = jnp.asarray(thecash, dtype=jnp.float32)
+    thehouse_j = jnp.asarray(thehouse, dtype=jnp.float32)
+
+    def _obj_jax(xv: jnp.ndarray) -> jnp.ndarray:
+        return _my_auxv_cal_jit(jnp.asarray(xv, dtype=jnp.float32), thecash_j, thehouse_j, *aux_args)
+
+    grad_obj = jax.jit(jax.grad(_obj_jax))
+
+    has_h_eq = h_mode in {"keep", "zero"}
+    m_con = 2 if has_h_eq else 1
+
+    def _cons_np(xv: np.ndarray) -> np.ndarray:
+        x_arr = np.asarray(xv, dtype=float)
+        budget_val = x_arr[0] + (x_arr[2] if buy_or_zero else 0.0)
+        if has_h_eq:
+            h_target = float(thehouse) if h_mode == "keep" else 0.0
+            return np.array([budget_val, x_arr[2]], dtype=float)
+        return np.array([budget_val], dtype=float)
+
+    def _jac_cons_np(_: np.ndarray) -> np.ndarray:
+        if has_h_eq:
+            # Flattened row-major Jacobian (m x n).
+            return np.array([1.0, 0.0, 1.0 if buy_or_zero else 0.0, 0.0, 0.0, 1.0], dtype=float)
+        return np.array([1.0, 0.0, 1.0 if buy_or_zero else 0.0], dtype=float)
+
+    class _CyIpoptNLP:
+        def objective(self, x):
+            return float(_obj_jax(jnp.asarray(x, dtype=jnp.float32)))
+
+        def gradient(self, x):
+            return np.asarray(grad_obj(jnp.asarray(x, dtype=jnp.float32)), dtype=float)
+
+        def constraints(self, x):
+            return _cons_np(x)
+
+        def jacobian(self, x):
+            return _jac_cons_np(x)
+
+    lb = np.array([c_lb, a_lb, h_lb], dtype=float)
+    ub = np.array([c_ub, a_ub, h_ub], dtype=float)
+    if has_h_eq:
+        h_target = float(thehouse) if h_mode == "keep" else 0.0
+        cl = np.array([-np.inf, h_target], dtype=float)
+        cu = np.array([float(b), h_target], dtype=float)
+    else:
+        cl = np.array([-np.inf], dtype=float)
+        cu = np.array([float(b)], dtype=float)
+
+    nlp = cyipopt.Problem(n=3, m=m_con, problem_obj=_CyIpoptNLP(), lb=lb, ub=ub, cl=cl, cu=cu)
+    nlp.add_option("print_level", 0)
+    nlp.add_option("max_iter", int(maxiter))
+    nlp.add_option("tol", float(ftol))
+    nlp.add_option("sb", "yes")
+    if constraint_tol is not None:
+        nlp.add_option("constr_viol_tol", float(constraint_tol))
+
+    x_opt, info = nlp.solve(np.asarray(x0, dtype=float))
+    obj_val = float(info.get("obj_val", np.nan)) if isinstance(info, dict) else np.nan
+    x = np.asarray(x_opt, dtype=float).reshape(3)
+    if np.all(np.isfinite(x)) and np.isfinite(obj_val):
+        return float(x[0]), float(x[1]), float(x[2]), float(-obj_val)
+
+    x_fb = np.asarray(x0, dtype=float)
+    return float(x_fb[0]), float(x_fb[1]), float(x_fb[2]), -np.inf
+
+
 def _gpu_cont_project(
     v: jnp.ndarray,
     lb: jnp.ndarray,
@@ -738,8 +887,8 @@ def mymain_se(
     if solver_mode == "gpu":
         # GPU-friendly path: fully JAX-batched discrete solver.
         solver_mode = "discrete"
-    elif solver_mode not in {"discrete", "continuous", "gpu_continuous"}:
-        raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous', 'gpu_continuous'}")
+    elif solver_mode not in {"discrete", "continuous", "continuous2", "gpu_continuous"}:
+        raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous', 'continuous2', 'gpu_continuous'}")
 
     interp_method = interp_method.lower()
     if interp_method not in {"linear", "nearest", "cubic", "spline"}:
@@ -951,7 +1100,7 @@ def mymain_se(
         h_mode: str,
         can_participate: bool,
         minhouse2: float,
-        model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray],
+        model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray] | None,
         warm_store: dict[tuple[str, bool], np.ndarray],
     ) -> tuple[float, float, float, float]:
         key = (h_mode, can_participate)
@@ -967,6 +1116,21 @@ def mymain_se(
                 minhouse2,
                 x0_override=warm_store.get(key),
                 maxiter=continuous_maxiter,
+            )
+        elif solver_mode == "continuous2":
+            out = _solve_one_state_continuous2(
+                c,
+                h,
+                aux_params,
+                b,
+                h_mode,
+                can_participate,
+                fp,
+                minhouse2,
+                x0_override=warm_store.get(key),
+                maxiter=continuous_maxiter,
+                ftol=continuous_ftol,
+                constraint_tol=continuous_constraint_tol,
             )
         else:
             out = _solve_one_state_continuous(
@@ -1158,7 +1322,7 @@ def mymain_se(
         ppcost = float(ppc_path1[t])
         otcost = float(otc_path1[t])
 
-        if solver_mode == "continuous":
+        if solver_mode in {"continuous", "continuous2"}:
             # Flatten state loop and drive 6 candidates from one case table.
             cont_case_specs = [
                 ("buy", True, _budget_sell),
@@ -1251,7 +1415,7 @@ def mymain_se(
                     method=interp_method,
                 )
 
-        if solver_mode == "continuous":
+        if solver_mode in {"continuous", "continuous2"}:
             # Flatten state loop and unify pay/nopay candidate evaluation.
             pay_specs = [
                 ("buy", True, _budget_sell),
