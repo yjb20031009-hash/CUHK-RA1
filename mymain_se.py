@@ -869,6 +869,8 @@ def mymain_se(
     continuous_constraint_tol: float | None = 1e-2,
     interp_method: str = "linear",
     surv_mat_path: str = "surv.mat",
+    save_convergence_diag: bool = False,
+    convergence_diag_path: str = "python_convergence_diag.mat",
 ):
     """主求解函数，对应 MATLAB `mymain_se`。
 
@@ -930,6 +932,35 @@ def mymain_se(
     A1 = A1.at[:, :, tn - 1].set(A[:, :, tn - 1])
     H1 = H1.at[:, :, tn - 1].set(H[:, :, tn - 1])
     V1 = V1.at[:, :, tn - 1].set(V[:, :, tn - 1])
+
+    def _build_convergence_diag(v_arr: np.ndarray, v1_arr: np.ndarray) -> dict[str, np.ndarray | float]:
+        """Build simple value-function convergence diagnostics across ages."""
+        if v_arr.shape[-1] <= 1:
+            v_sup = np.zeros((0,), dtype=float)
+            v1_sup = np.zeros((0,), dtype=float)
+            v_rel = np.zeros((0,), dtype=float)
+            v1_rel = np.zeros((0,), dtype=float)
+        else:
+            v_diff = np.abs(v_arr[:, :, :-1] - v_arr[:, :, 1:])
+            v1_diff = np.abs(v1_arr[:, :, :-1] - v1_arr[:, :, 1:])
+            v_sup = np.max(v_diff, axis=(0, 1))
+            v1_sup = np.max(v1_diff, axis=(0, 1))
+
+            v_scale = np.maximum(1.0, np.max(np.abs(v_arr[:, :, 1:]), axis=(0, 1)))
+            v1_scale = np.maximum(1.0, np.max(np.abs(v1_arr[:, :, 1:]), axis=(0, 1)))
+            v_rel = v_sup / v_scale
+            v1_rel = v1_sup / v1_scale
+
+        return {
+            "V_supnorm_diff": v_sup,
+            "V1_supnorm_diff": v1_sup,
+            "V_rel_supnorm_diff": v_rel,
+            "V1_rel_supnorm_diff": v1_rel,
+            "V_nan_count": float(np.isnan(v_arr).sum()),
+            "V1_nan_count": float(np.isnan(v1_arr).sum()),
+            "V_inf_count": float(np.isinf(v_arr).sum()),
+            "V1_inf_count": float(np.isinf(v1_arr).sum()),
+        }
 
     def _precompute_backward_paths(base_ppc: float, base_otc: float):
         income_arr = np.zeros(tn, dtype=float)
@@ -1304,14 +1335,24 @@ def mymain_se(
         except Exception as e:
             print(f"\n>>> 打印决策值失败: {e}")
 
+        c_np, a_np, h_np = np.asarray(C), np.asarray(A), np.asarray(H)
+        c1_np, a1_np, h1_np = np.asarray(C1), np.asarray(A1), np.asarray(H1)
+        v_np, v1_np = np.asarray(V), np.asarray(V1)
+
         save_data = {
-            "C_py": np.asarray(C),
-            "A_py": np.asarray(A),
-            "H_py": np.asarray(H),
+            "C_py": c_np,
+            "A_py": a_np,
+            "H_py": h_np,
         }
         sio.savemat("python_quick_test_result.mat", save_data)
         print("\n>>> Python 决策矩阵已存入 python_quick_test_result.mat")
-        return np.asarray(C), np.asarray(A), np.asarray(H), np.asarray(C1), np.asarray(A1), np.asarray(H1)
+
+        if save_convergence_diag:
+            diag_data = _build_convergence_diag(v_np, v1_np)
+            sio.savemat(convergence_diag_path, {k: np.asarray(v) for k, v in diag_data.items()})
+            print(f"\n>>> 收敛诊断已存入 {convergence_diag_path}")
+
+        return c_np, a_np, h_np, c1_np, a1_np, h1_np
 
     # Loop 1: 已经支付过 one-time cost 的人群（批量化 state 维度）
     income1, gyp1, ppc_path1, otc_path1, minh2_path1 = _precompute_backward_paths(float(ppcost_in), 0.0)
@@ -1511,4 +1552,11 @@ def mymain_se(
     # MATLAB 中对极小房产选择做清零
     H = jnp.where(H < 1e-3, 0.0, H)
     H1 = jnp.where(H1 < 1e-3, 0.0, H1)
-    return np.asarray(C), np.asarray(A), np.asarray(H), np.asarray(C1), np.asarray(A1), np.asarray(H1)
+    c_np, a_np, h_np = np.asarray(C), np.asarray(A), np.asarray(H)
+    c1_np, a1_np, h1_np = np.asarray(C1), np.asarray(A1), np.asarray(H1)
+    if save_convergence_diag:
+        v_np, v1_np = np.asarray(V), np.asarray(V1)
+        diag_data = _build_convergence_diag(v_np, v1_np)
+        sio.savemat(convergence_diag_path, {k: np.asarray(v) for k, v in diag_data.items()})
+        print(f"\n>>> 收敛诊断已存入 {convergence_diag_path}")
+    return c_np, a_np, h_np, c1_np, a1_np, h1_np
