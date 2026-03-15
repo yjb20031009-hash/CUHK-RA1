@@ -888,7 +888,12 @@ def mymain_se(
     interp_method = interp_method.lower()
     if interp_method not in {"linear", "nearest", "cubic", "spline"}:
         raise ValueError("interp_method must be one of {'linear', 'nearest', 'cubic', 'spline'}")
-    interp_method_code = {"linear": 0, "nearest": 1, "cubic": 2, "spline": 3}[interp_method]
+    # GPU-continuous JAX interpolation path is guaranteed for linear/nearest;
+    # gracefully downgrade cubic/spline to linear to avoid backend mismatch.
+    gpu_interp_method = interp_method
+    if solver_mode == "gpu_continuous" and interp_method in {"cubic", "spline"}:
+        gpu_interp_method = "linear"
+    interp_method_code = {"linear": 0, "nearest": 1, "cubic": 2, "spline": 3}[gpu_interp_method]
 
     tn = int(lcfg.td - lcfg.tb + 1)
     gcash, ghouse = _build_state_grids(fp, gcfg)
