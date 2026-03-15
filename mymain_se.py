@@ -536,7 +536,7 @@ def _gpu_cont_project(
     return jnp.array([c, a, h], dtype=jnp.float32)
 
 
-@partial(jax.jit, static_argnames=("interp_method_code",))
+@jax.jit
 def _gpu_cont_obj(
     v: jnp.ndarray,
     lb: jnp.ndarray,
@@ -573,35 +573,48 @@ def _gpu_cont_obj(
     interp_method_code: int,
 ) -> jnp.ndarray:
     vv = _gpu_cont_project(v, lb, ub, b, c_lb, c_ub, buy_or_zero)
-    interp_method = ("linear", "nearest", "cubic", "spline")[int(interp_method_code)]
-    return _my_auxv_cal_jit(
-        vv,
-        thecash,
-        thehouse,
-        v_next=v_next,
-        gcash_grid=gcash_grid,
-        ghouse_grid=ghouse_grid,
-        t=t,
-        rho=rho,
-        delta=delta,
-        psi_1=psi_1,
-        psi_2=psi_2,
-        theta=theta,
-        gyp=gyp,
-        adjcost=adjcost,
-        ppt=ppt,
-        ppcost=ppcost,
-        otcost=otcost,
-        income=income,
-        survprob=survprob,
-        gret_sh=gret_sh,
-        r=r,
-        cash_min=cash_min,
-        cash_max=cash_max,
-        house_min=house_min,
-        house_max=house_max,
-        eq_atol=eq_atol,
-        interp_method=interp_method,
+    def _obj_with_method(method: str) -> jnp.ndarray:
+        return _my_auxv_cal_jit(
+            vv,
+            thecash,
+            thehouse,
+            v_next=v_next,
+            gcash_grid=gcash_grid,
+            ghouse_grid=ghouse_grid,
+            t=t,
+            rho=rho,
+            delta=delta,
+            psi_1=psi_1,
+            psi_2=psi_2,
+            theta=theta,
+            gyp=gyp,
+            adjcost=adjcost,
+            ppt=ppt,
+            ppcost=ppcost,
+            otcost=otcost,
+            income=income,
+            survprob=survprob,
+            gret_sh=gret_sh,
+            r=r,
+            cash_min=cash_min,
+            cash_max=cash_max,
+            house_min=house_min,
+            house_max=house_max,
+            eq_atol=eq_atol,
+            interp_method=method,
+        )
+
+    code = jnp.asarray(interp_method_code, dtype=jnp.int32)
+    code = jnp.clip(code, 0, 3)
+    return jax.lax.switch(
+        code,
+        [
+            lambda _: _obj_with_method("linear"),
+            lambda _: _obj_with_method("nearest"),
+            lambda _: _obj_with_method("cubic"),
+            lambda _: _obj_with_method("spline"),
+        ],
+        operand=None,
     )
 
 
