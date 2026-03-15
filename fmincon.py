@@ -64,6 +64,101 @@ def _constraint_violation(
     return float(v)
 
 
+
+def _build_slsqp_constraints(
+    A: np.ndarray | None,
+    b: np.ndarray | None,
+    Aeq: np.ndarray | None,
+    beq: np.ndarray | None,
+    nonlcon: Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]] | None,
+):
+    """Build old-style SciPy SLSQP constraints dicts (ineq: g(x)>=0, eq: h(x)=0)."""
+    constraints: list[dict] = []
+
+    if A is not None and b is not None:
+        A_arr = np.atleast_2d(np.asarray(A, dtype=float))
+        b_arr = np.asarray(b, dtype=float).reshape(-1)
+
+        def lin_ineq_fun(x):
+            return b_arr - A_arr @ np.asarray(x, dtype=float)
+
+        def lin_ineq_jac(_x):
+            return -A_arr
+
+        constraints.append({"type": "ineq", "fun": lin_ineq_fun, "jac": lin_ineq_jac})
+
+    if Aeq is not None and beq is not None:
+        Aeq_arr = np.atleast_2d(np.asarray(Aeq, dtype=float))
+        beq_arr = np.asarray(beq, dtype=float).reshape(-1)
+
+        def lin_eq_fun(x):
+            return Aeq_arr @ np.asarray(x, dtype=float) - beq_arr
+
+        def lin_eq_jac(_x):
+            return Aeq_arr
+
+        constraints.append({"type": "eq", "fun": lin_eq_fun, "jac": lin_eq_jac})
+
+    if nonlcon is not None:
+        c_jac_jit = jax.jit(jax.jacobian(lambda z: jnp.asarray(nonlcon(z)[0], dtype=jnp.float64)))
+        ceq_jac_jit = jax.jit(jax.jacobian(lambda z: jnp.asarray(nonlcon(z)[1], dtype=jnp.float64)))
+
+        def c_fun(x):
+            c, _ = nonlcon(jnp.asarray(x))
+            return -np.asarray(c, dtype=float)
+
+        def c_jac(x):
+            return -np.asarray(c_jac_jit(jnp.asarray(x)), dtype=float)
+
+        def ceq_fun(x):
+            _, ceq = nonlcon(jnp.asarray(x))
+            return np.asarray(ceq, dtype=float)
+
+        def ceq_jac(x):
+            return np.asarray(ceq_jac_jit(jnp.asarray(x)), dtype=float)
+
+        constraints.append({"type": "ineq", "fun": c_fun, "jac": c_jac})
+        constraints.append({"type": "eq", "fun": ceq_fun, "jac": ceq_jac})
+
+    return constraints
+
+
+def _build_trust_constraints(
+    A: np.ndarray | None,
+    b: np.ndarray | None,
+    Aeq: np.ndarray | None,
+    beq: np.ndarray | None,
+    nonlcon: Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]] | None,
+):
+    """Build new-style trust-constr constraints."""
+    constraints = []
+    if A is not None and b is not None:
+        constraints.append(LinearConstraint(np.asarray(A, dtype=float), -np.inf, np.asarray(b, dtype=float)))
+    if Aeq is not None and beq is not None:
+        beq_arr = np.asarray(beq, dtype=float)
+        constraints.append(LinearConstraint(np.asarray(Aeq, dtype=float), beq_arr, beq_arr))
+    if nonlcon is not None:
+        def c_fun(x):
+            c, _ = nonlcon(jnp.asarray(x))
+            return np.asarray(c, dtype=float)
+
+        def ceq_fun(x):
+            _, ceq = nonlcon(jnp.asarray(x))
+            return np.asarray(ceq, dtype=float)
+
+        c_jac_jit = jax.jit(jax.jacobian(lambda z: jnp.asarray(nonlcon(z)[0], dtype=jnp.float64)))
+        ceq_jac_jit = jax.jit(jax.jacobian(lambda z: jnp.asarray(nonlcon(z)[1], dtype=jnp.float64)))
+
+        def c_jac(x):
+            return np.asarray(c_jac_jit(jnp.asarray(x)), dtype=float)
+
+        def ceq_jac(x):
+            return np.asarray(ceq_jac_jit(jnp.asarray(x)), dtype=float)
+
+        constraints.append(NonlinearConstraint(c_fun, -np.inf, 0.0, jac=c_jac))
+        constraints.append(NonlinearConstraint(ceq_fun, 0.0, 0.0, jac=ceq_jac))
+    return constraints
+
 def fmincon(
     fun: Callable[[jnp.ndarray], jnp.ndarray | float],
     x0: Sequence[float],
@@ -86,38 +181,12 @@ def fmincon(
     options = options or {}
 
     method = options.get("Algorithm", "sqp").lower()
-    scipy_method = "SLSQP" if method in {"sqp", "active-set", "interior-point"} else "trust-constr"
+    scipy_method = "trust-constr" if method in {"interior-point", "trust-region-reflective"} else "SLSQP"
 
-    constraints = []
-
-    if A is not None and b is not None:
-        constraints.append(LinearConstraint(np.asarray(A, dtype=float), -np.inf, np.asarray(b, dtype=float)))
-    if Aeq is not None and beq is not None:
-        beq_arr = np.asarray(beq, dtype=float)
-        constraints.append(LinearConstraint(np.asarray(Aeq, dtype=float), beq_arr, beq_arr))
-
-    if nonlcon is not None:
-        def c_fun(x):
-            c, _ = nonlcon(jnp.asarray(x))
-            return np.asarray(c, dtype=float)
-
-        def ceq_fun(x):
-            _, ceq = nonlcon(jnp.asarray(x))
-            return np.asarray(ceq, dtype=float)
-
-        # Provide Jacobians for nonlinear constraints so SciPy does not
-        # repeatedly finite-difference them.
-        c_jac_jit = jax.jit(jax.jacobian(lambda z: jnp.asarray(nonlcon(z)[0], dtype=jnp.float64)))
-        ceq_jac_jit = jax.jit(jax.jacobian(lambda z: jnp.asarray(nonlcon(z)[1], dtype=jnp.float64)))
-
-        def c_jac(x):
-            return np.asarray(c_jac_jit(jnp.asarray(x)), dtype=float)
-
-        def ceq_jac(x):
-            return np.asarray(ceq_jac_jit(jnp.asarray(x)), dtype=float)
-
-        constraints.append(NonlinearConstraint(c_fun, -np.inf, 0.0, jac=c_jac))
-        constraints.append(NonlinearConstraint(ceq_fun, 0.0, 0.0, jac=ceq_jac))
+    if scipy_method == "SLSQP":
+        constraints = _build_slsqp_constraints(A, b, Aeq, beq, nonlcon)
+    else:
+        constraints = _build_trust_constraints(A, b, Aeq, beq, nonlcon)
 
     if lb is None:
         lb = -np.inf * np.ones(n)
@@ -127,12 +196,25 @@ def fmincon(
 
     objective_jac = jac if jac is not None else _wrap_jac(fun)
 
-    optimality_tol = float(options.get("OptimalityTolerance", 1e-8))
-    constraint_tol = options.get("ConstraintTolerance", None)
+    optimality_tol = float(options.get("OptimalityTolerance", options.get("TolFun", 1e-8)))
+    constraint_tol = options.get("ConstraintTolerance", options.get("TolCon", None))
     constraint_tol = float(constraint_tol) if constraint_tol is not None else None
     # SLSQP only exposes a single ftol; approximate MATLAB split tolerances by
     # using the tighter of optimality/constraint tolerances when both are provided.
     scipy_ftol = min(optimality_tol, constraint_tol) if constraint_tol is not None else optimality_tol
+
+    scipy_options = {
+        "maxiter": int(options.get("MaxIterations", options.get("MaxIter", 1000))),
+        "disp": bool(options.get("Display", False)),
+    }
+    if scipy_method == "SLSQP":
+        scipy_options["ftol"] = float(scipy_ftol)
+    else:
+        # trust-constr accepts separate stopping tolerances; map MATLAB-like
+        # optimality/constraint tolerances accordingly for interior-point behavior.
+        scipy_options["gtol"] = float(optimality_tol)
+        if constraint_tol is not None:
+            scipy_options["barrier_tol"] = float(constraint_tol)
 
     res: OptimizeResult = minimize(
         _wrap_fun(fun),
@@ -141,11 +223,7 @@ def fmincon(
         jac=objective_jac,
         bounds=bounds,
         constraints=constraints,
-        options={
-            "maxiter": int(options.get("MaxIterations", 1000)),
-            "ftol": float(scipy_ftol),
-            "disp": bool(options.get("Display", False)),
-        },
+        options=scipy_options,
     )
 
     maxcv = _constraint_violation(np.asarray(res.x, dtype=float), A, b, Aeq, beq, nonlcon)
