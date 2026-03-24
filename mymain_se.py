@@ -155,8 +155,11 @@ def _income_growth(fp: FixedParams, lcfg: LifeCfg, t: int) -> tuple[float, float
     """给定期 t，返回当期 income 与收入增长因子 gyp。"""
     if t + 1 >= int(lcfg.tr - lcfg.tb):
         return fp.ret_fac, 1.0
-    age1 = lcfg.stept * (t + lcfg.tb + 1)
-    age2 = lcfg.stept * (t + lcfg.tb)
+    # Python t is 0-based while MATLAB t is 1-based in the original loop.
+    # Match MATLAB age mapping: age1=stept*(t_mat+tb+1), age2=stept*(t_mat+tb),
+    # where t_mat = t + 1.
+    age1 = lcfg.stept * (t + lcfg.tb + 2)
+    age2 = lcfg.stept * (t + lcfg.tb + 1)
 
     f_y1 = np.exp(fp.incaa + fp.incb1 * age1 + fp.incb2 * age1**2 + fp.incb3 * age1**3)
     f_y1_2 = np.exp(fp.incaa + fp.incb1 * (age1 + 1) + fp.incb2 * (age1 + 1) ** 2 + fp.incb3 * (age1 + 1) ** 3)
@@ -1182,15 +1185,17 @@ def mymain_se(
         minh2_arr = np.zeros(tn, dtype=float)
         ppc_cur = float(base_ppc)
         otc_cur = float(base_otc)
+        minh2_cur = float(_minhouse2_normalized(fp))
         for t in range(tn - 2, -1, -1):
             income_t, gyp_t = _income_growth(fp, lcfg, t)
             ppc_cur *= gyp_t
             otc_cur *= gyp_t
+            minh2_cur *= gyp_t
             income_arr[t] = income_t
             gyp_arr[t] = gyp_t
             ppc_arr[t] = ppc_cur
             otc_arr[t] = otc_cur
-            minh2_arr[t] = _minhouse2_normalized(fp) * gyp_t
+            minh2_arr[t] = minh2_cur
         return income_arr, gyp_arr, ppc_arr, otc_arr, minh2_arr
 
     def loop_block(
