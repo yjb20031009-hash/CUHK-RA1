@@ -546,7 +546,7 @@ def _gpu_cont_project(
     c, a, h = v[0], v[1], v[2]
     c_cap = jnp.where(buy_or_zero, jnp.maximum(0.25, b - h), jnp.maximum(0.25, b))
     c = jnp.clip(jnp.minimum(c, c_cap), c_lb, c_ub)
-    return jnp.array([c, a, h], dtype=jnp.float32)
+    return jnp.array([c, a, h], dtype=jnp.float64)
 
 
 @jax.jit
@@ -725,7 +725,7 @@ def _gpu_cont_batch_optimize(
         )
 
     x0 = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
-    step_size = jnp.float32(0.001)
+    step_size = jnp.float64(0.001)
 
     def _iter_body(_i, x_curr):
         g = grad_vmap(x_curr)
@@ -748,7 +748,7 @@ def _step_schedule(
 ) -> jnp.ndarray:
     b1 = jnp.int32(maxiter * f1)
     b2 = jnp.int32(maxiter * (f1 + f2))
-    return jnp.where(it < b1, s1, jnp.where(it < b2, s2, s3)).astype(jnp.float32)
+    return jnp.where(it < b1, s1, jnp.where(it < b2, s2, s3)).astype(jnp.float64)
 
 
 def _build_gpu_multistart_init(
@@ -1099,10 +1099,10 @@ def mymain_se(
     weig = np.asarray(weig2)[0, :].reshape(-1)
     gret_sh = _gret_sh(fp, grid, weig, mu, muh, gcfg.n)
 
-    C = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
-    A = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
-    H = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
-    V = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
+    C = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
+    A = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
+    H = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
+    V = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
     C1, A1, H1, V1 = C, A, H, V
 
     # 终值条件：最后一期把可变现资源用于消费
@@ -1228,20 +1228,20 @@ def mymain_se(
 
     def _solve_case_batch_gpu_cont(aux_params: AuxVParams, ppc: float, otc: float, minh2: float, *, h_mode: str, can_participate: bool, budget_fn, interp_method_code: int):
         """Batch solve all states for gpu_continuous mode (A: batch states)."""
-        b_vec = jnp.asarray(budget_fn(cash_flat, house_flat, ppc, otc), dtype=jnp.float32)
+        b_vec = jnp.asarray(budget_fn(cash_flat, house_flat, ppc, otc), dtype=jnp.float64)
         c_lb = jnp.full_like(b_vec, 0.25)
         c_ub = jnp.maximum(b_vec, 0.25)
 
         if h_mode == "keep":
-            h_lb = jnp.asarray(house_flat, dtype=jnp.float32)
-            h_ub = jnp.asarray(house_flat, dtype=jnp.float32)
+            h_lb = jnp.asarray(house_flat, dtype=jnp.float64)
+            h_ub = jnp.asarray(house_flat, dtype=jnp.float64)
             buy_or_zero = False
         elif h_mode == "zero":
             h_lb = jnp.zeros_like(b_vec)
             h_ub = jnp.zeros_like(b_vec)
             buy_or_zero = True
         else:
-            h_lb = jnp.full_like(b_vec, jnp.asarray(minh2, dtype=jnp.float32))
+            h_lb = jnp.full_like(b_vec, jnp.asarray(minh2, dtype=jnp.float64))
             h_ub = jnp.full_like(b_vec, float(fp.maxhouse))
             buy_or_zero = True
 
@@ -1257,7 +1257,7 @@ def mymain_se(
         h0 = jnp.where(
             jnp.isclose(h_lb, h_ub),
             h_lb,
-            jnp.clip(jnp.where(h_mode == "buy", jnp.asarray(minh2, dtype=jnp.float32), 0.0), h_lb, h_ub),
+            jnp.clip(jnp.where(h_mode == "buy", jnp.asarray(minh2, dtype=jnp.float64), 0.0), h_lb, h_ub),
         )
         c0_buyzero = jnp.clip(0.5 * jnp.maximum(b_vec - h0, c_lb), c_lb, c_ub)
         c0_keep = jnp.clip(0.5 * jnp.maximum(b_vec, c_lb), c_lb, c_ub)
@@ -1267,32 +1267,32 @@ def mymain_se(
         lb = jnp.stack([c_lb, a_lb, h_lb], axis=1)
         ub = jnp.stack([c_ub, a_ub, h_ub], axis=1)
 
-        thecash_vec = jnp.asarray(cash_flat, dtype=jnp.float32)
-        thehouse_vec = jnp.asarray(house_flat, dtype=jnp.float32)
+        thecash_vec = jnp.asarray(cash_flat, dtype=jnp.float64)
+        thehouse_vec = jnp.asarray(house_flat, dtype=jnp.float64)
         aux_args = (
             jnp.asarray(aux_params.t, dtype=jnp.int32),
-            jnp.asarray(aux_params.rho, dtype=jnp.float32),
-            jnp.asarray(aux_params.delta, dtype=jnp.float32),
-            jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
-            jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
-            jnp.asarray(aux_params.theta, dtype=jnp.float32),
-            jnp.asarray(aux_params.gyp, dtype=jnp.float32),
-            jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.ppt, dtype=jnp.float32),
-            jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.otcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.income, dtype=jnp.float32),
-            jnp.asarray(aux_params.survprob, dtype=jnp.float32),
-            jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
-            jnp.asarray(aux_params.r, dtype=jnp.float32),
-            jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
-            jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
-            jnp.asarray(aux_params.house_min, dtype=jnp.float32),
-            jnp.asarray(aux_params.house_max, dtype=jnp.float32),
-            jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
-            jnp.asarray(aux_params.v_next, dtype=jnp.float32),
-            jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
-            jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
+            jnp.asarray(aux_params.rho, dtype=jnp.float64),
+            jnp.asarray(aux_params.delta, dtype=jnp.float64),
+            jnp.asarray(aux_params.psi_1, dtype=jnp.float64),
+            jnp.asarray(aux_params.psi_2, dtype=jnp.float64),
+            jnp.asarray(aux_params.theta, dtype=jnp.float64),
+            jnp.asarray(aux_params.gyp, dtype=jnp.float64),
+            jnp.asarray(aux_params.adjcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.ppt, dtype=jnp.float64),
+            jnp.asarray(aux_params.ppcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.otcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.income, dtype=jnp.float64),
+            jnp.asarray(aux_params.survprob, dtype=jnp.float64),
+            jnp.asarray(aux_params.gret_sh, dtype=jnp.float64),
+            jnp.asarray(aux_params.r, dtype=jnp.float64),
+            jnp.asarray(aux_params.cash_min, dtype=jnp.float64),
+            jnp.asarray(aux_params.cash_max, dtype=jnp.float64),
+            jnp.asarray(aux_params.house_min, dtype=jnp.float64),
+            jnp.asarray(aux_params.house_max, dtype=jnp.float64),
+            jnp.asarray(aux_params.eq_atol, dtype=jnp.float64),
+            jnp.asarray(aux_params.v_next, dtype=jnp.float64),
+            jnp.asarray(aux_params.gcash_grid, dtype=jnp.float64),
+            jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float64),
         )
 
         return _gpu_cont_batch_optimize(
@@ -1348,19 +1348,19 @@ def mymain_se(
         interp_method_code: int,
         warm_x: jnp.ndarray | None = None,
     ):
-        b_vec = jnp.asarray(budget_fn(cash_flat, house_flat, ppc, otc), dtype=jnp.float32)
+        b_vec = jnp.asarray(budget_fn(cash_flat, house_flat, ppc, otc), dtype=jnp.float64)
         c_lb = jnp.full_like(b_vec, 0.25)
         c_ub = jnp.maximum(b_vec, 0.25)
         if h_mode == "keep":
-            h_lb = jnp.asarray(house_flat, dtype=jnp.float32)
-            h_ub = jnp.asarray(house_flat, dtype=jnp.float32)
+            h_lb = jnp.asarray(house_flat, dtype=jnp.float64)
+            h_ub = jnp.asarray(house_flat, dtype=jnp.float64)
             buy_or_zero = False
         elif h_mode == "zero":
             h_lb = jnp.zeros_like(b_vec)
             h_ub = jnp.zeros_like(b_vec)
             buy_or_zero = True
         else:
-            h_lb = jnp.full_like(b_vec, jnp.asarray(minh2, dtype=jnp.float32))
+            h_lb = jnp.full_like(b_vec, jnp.asarray(minh2, dtype=jnp.float64))
             h_ub = jnp.full_like(b_vec, float(fp.maxhouse))
             buy_or_zero = True
 
@@ -1382,32 +1382,32 @@ def mymain_se(
             warm_x=warm_x if gpu_use_warmstart else None,
         )
 
-        thecash_vec = jnp.asarray(cash_flat, dtype=jnp.float32)
-        thehouse_vec = jnp.asarray(house_flat, dtype=jnp.float32)
+        thecash_vec = jnp.asarray(cash_flat, dtype=jnp.float64)
+        thehouse_vec = jnp.asarray(house_flat, dtype=jnp.float64)
         aux_args = (
             jnp.asarray(aux_params.t, dtype=jnp.int32),
-            jnp.asarray(aux_params.rho, dtype=jnp.float32),
-            jnp.asarray(aux_params.delta, dtype=jnp.float32),
-            jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
-            jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
-            jnp.asarray(aux_params.theta, dtype=jnp.float32),
-            jnp.asarray(aux_params.gyp, dtype=jnp.float32),
-            jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.ppt, dtype=jnp.float32),
-            jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.otcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.income, dtype=jnp.float32),
-            jnp.asarray(aux_params.survprob, dtype=jnp.float32),
-            jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
-            jnp.asarray(aux_params.r, dtype=jnp.float32),
-            jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
-            jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
-            jnp.asarray(aux_params.house_min, dtype=jnp.float32),
-            jnp.asarray(aux_params.house_max, dtype=jnp.float32),
-            jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
-            jnp.asarray(aux_params.v_next, dtype=jnp.float32),
-            jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
-            jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
+            jnp.asarray(aux_params.rho, dtype=jnp.float64),
+            jnp.asarray(aux_params.delta, dtype=jnp.float64),
+            jnp.asarray(aux_params.psi_1, dtype=jnp.float64),
+            jnp.asarray(aux_params.psi_2, dtype=jnp.float64),
+            jnp.asarray(aux_params.theta, dtype=jnp.float64),
+            jnp.asarray(aux_params.gyp, dtype=jnp.float64),
+            jnp.asarray(aux_params.adjcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.ppt, dtype=jnp.float64),
+            jnp.asarray(aux_params.ppcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.otcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.income, dtype=jnp.float64),
+            jnp.asarray(aux_params.survprob, dtype=jnp.float64),
+            jnp.asarray(aux_params.gret_sh, dtype=jnp.float64),
+            jnp.asarray(aux_params.r, dtype=jnp.float64),
+            jnp.asarray(aux_params.cash_min, dtype=jnp.float64),
+            jnp.asarray(aux_params.cash_max, dtype=jnp.float64),
+            jnp.asarray(aux_params.house_min, dtype=jnp.float64),
+            jnp.asarray(aux_params.house_max, dtype=jnp.float64),
+            jnp.asarray(aux_params.eq_atol, dtype=jnp.float64),
+            jnp.asarray(aux_params.v_next, dtype=jnp.float64),
+            jnp.asarray(aux_params.gcash_grid, dtype=jnp.float64),
+            jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float64),
         )
         best = _gpu_cont_batch_optimize_v2(
             x0_pool, lb, ub, b_vec, c_lb, c_ub, buy_or_zero, thecash_vec, thehouse_vec,
@@ -1490,11 +1490,11 @@ def mymain_se(
         t_seq = jnp.arange(tn - 2, -1, -1, dtype=jnp.int32)
 
         income1, gyp1, ppc_path1, otc_path1, minh2_path1 = _precompute_backward_paths(float(ppcost_in), 0.0)
-        income1_j = jnp.asarray(income1, dtype=jnp.float32)
-        gyp1_j = jnp.asarray(gyp1, dtype=jnp.float32)
-        ppc1_j = jnp.asarray(ppc_path1, dtype=jnp.float32)
-        otc1_j = jnp.asarray(otc_path1, dtype=jnp.float32)
-        minh1_j = jnp.asarray(minh2_path1, dtype=jnp.float32)
+        income1_j = jnp.asarray(income1, dtype=jnp.float64)
+        gyp1_j = jnp.asarray(gyp1, dtype=jnp.float64)
+        ppc1_j = jnp.asarray(ppc_path1, dtype=jnp.float64)
+        otc1_j = jnp.asarray(otc_path1, dtype=jnp.float64)
+        minh1_j = jnp.asarray(minh2_path1, dtype=jnp.float64)
 
         def _scan_loop1_body(v_next, xs):
             t, ppcost, otcost, income, gyp, minhouse2 = xs
@@ -1546,11 +1546,11 @@ def mymain_se(
         V = V.at[:, :, t_seq].set(jnp.transpose(best_seq1[:, :, :, 3], (1, 2, 0)))
 
         income2, gyp2, ppc_path2, otc_path2, minh2_path2 = _precompute_backward_paths(float(ppcost_in), float(otcost_in))
-        income2_j = jnp.asarray(income2, dtype=jnp.float32)
-        gyp2_j = jnp.asarray(gyp2, dtype=jnp.float32)
-        ppc2_j = jnp.asarray(ppc_path2, dtype=jnp.float32)
-        otc2_j = jnp.asarray(otc_path2, dtype=jnp.float32)
-        minh2_j = jnp.asarray(minh2_path2, dtype=jnp.float32)
+        income2_j = jnp.asarray(income2, dtype=jnp.float64)
+        gyp2_j = jnp.asarray(gyp2, dtype=jnp.float64)
+        ppc2_j = jnp.asarray(ppc_path2, dtype=jnp.float64)
+        otc2_j = jnp.asarray(otc_path2, dtype=jnp.float64)
+        minh2_j = jnp.asarray(minh2_path2, dtype=jnp.float64)
         vpay_seq = jnp.transpose(V[:, :, 1:], (2, 0, 1))[::-1]
 
         def _scan_loop2_body(v1_next, xs):
@@ -1693,9 +1693,9 @@ def mymain_se(
             if gpu_use_warmstart and t + 1 < tn:
                 warm_next = jnp.stack(
                     [
-                        jnp.asarray(C[:, :, t + 1], dtype=jnp.float32).reshape(-1),
-                        jnp.asarray(A[:, :, t + 1], dtype=jnp.float32).reshape(-1),
-                        jnp.asarray(H[:, :, t + 1], dtype=jnp.float32).reshape(-1),
+                        jnp.asarray(C[:, :, t + 1], dtype=jnp.float64).reshape(-1),
+                        jnp.asarray(A[:, :, t + 1], dtype=jnp.float64).reshape(-1),
+                        jnp.asarray(H[:, :, t + 1], dtype=jnp.float64).reshape(-1),
                     ],
                     axis=1,
                 )
@@ -1728,10 +1728,10 @@ def mymain_se(
             best_idx = jnp.argmax(case_stack[:, :, 3], axis=0)
             best = jnp.take_along_axis(case_stack, best_idx[None, :, None], axis=0)[0]
             best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
-        C = C.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float32))
-        A = A.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float32))
-        H = H.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float32))
-        V = V.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float32))
+        C = C.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float64))
+        A = A.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float64))
+        H = H.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float64))
+        V = V.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float64))
 
     # Loop 2: 未支付过 one-time cost 的人群（批量化 state 维度）
     # 对比“当期支付 otcost”与“继续不支付”两条路径，选价值更高者
@@ -1813,17 +1813,17 @@ def mymain_se(
             if gpu_use_warmstart and t + 1 < tn:
                 warm_pay = jnp.stack(
                     [
-                        jnp.asarray(C[:, :, t + 1], dtype=jnp.float32).reshape(-1),
-                        jnp.asarray(A[:, :, t + 1], dtype=jnp.float32).reshape(-1),
-                        jnp.asarray(H[:, :, t + 1], dtype=jnp.float32).reshape(-1),
+                        jnp.asarray(C[:, :, t + 1], dtype=jnp.float64).reshape(-1),
+                        jnp.asarray(A[:, :, t + 1], dtype=jnp.float64).reshape(-1),
+                        jnp.asarray(H[:, :, t + 1], dtype=jnp.float64).reshape(-1),
                     ],
                     axis=1,
                 )
                 warm_nopay = jnp.stack(
                     [
-                        jnp.asarray(C1[:, :, t + 1], dtype=jnp.float32).reshape(-1),
-                        jnp.asarray(A1[:, :, t + 1], dtype=jnp.float32).reshape(-1),
-                        jnp.asarray(H1[:, :, t + 1], dtype=jnp.float32).reshape(-1),
+                        jnp.asarray(C1[:, :, t + 1], dtype=jnp.float64).reshape(-1),
+                        jnp.asarray(A1[:, :, t + 1], dtype=jnp.float64).reshape(-1),
+                        jnp.asarray(H1[:, :, t + 1], dtype=jnp.float64).reshape(-1),
                     ],
                     axis=1,
                 )
@@ -1874,10 +1874,10 @@ def mymain_se(
             use_pay = pay_best[:, 3] >= nopay_best[:, 3]
             best = jnp.where(use_pay[:, None], pay_best, nopay_best)
             best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
-        C1 = C1.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float32))
-        A1 = A1.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float32))
-        H1 = H1.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float32))
-        V1 = V1.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float32))
+        C1 = C1.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float64))
+        A1 = A1.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float64))
+        H1 = H1.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float64))
+        V1 = V1.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float64))
 
     # MATLAB 中对极小房产选择做清零
     H = jnp.where(H < 1e-3, 0.0, H)
