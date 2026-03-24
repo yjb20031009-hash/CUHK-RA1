@@ -116,7 +116,20 @@ def _my_auxv_cal_jit(
     )
     cash_nn = jnp.clip(cash_nn, cash_min, cash_max)
 
-    int_v = interp2_regular(ghouse_grid, gcash_grid, v_next, housing_nn, cash_nn, method=interp_method, bounds="clip")
+    # Some runtime environments only provide linear/nearest kernels in interp2.
+    # Gracefully downgrade cubic/spline requests to linear for robustness.
+    interp_method_local = interp_method.lower()
+    if interp_method_local in ("cubic", "spline"):
+        interp_method_local = "linear"
+    int_v = interp2_regular(
+        ghouse_grid,
+        gcash_grid,
+        v_next,
+        housing_nn,
+        cash_nn,
+        method=interp_method_local,
+        bounds="clip",
+    )
     eps = jnp.asarray(1e-8, dtype=jnp.float32)
     int_v = jnp.where(jnp.isfinite(int_v), int_v, eps)
     int_v = jnp.maximum(int_v, eps)

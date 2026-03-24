@@ -114,8 +114,8 @@ def run_variant(
 
 def base_cfg(**kwargs) -> EstimationConfig:
     # MATLAB baseline uses per-state nonlinear optimization (`fmincon`-style).
-    # Use gpu_continuous mode by default for better alignment with GPU-path experiments,
-    # while still allowing callers to override via kwargs.
+    # Default to gpu_continuous for stable batch speed, while allowing callers
+    # to override to continuous / continuous2 / discrete via kwargs.
     cfg = replace(
         EstimationConfig(),
         ncash=21,
