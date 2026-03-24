@@ -84,7 +84,9 @@ def _my_auxv_cal_jit(
 
     house_gross = gret_sh[:, 1]
     housing_nn = myh * house_gross / gyp
-    housing_nn = jnp.clip(housing_nn, house_min, house_max)
+    # MATLAB my_auxV_cal.m uses hard bounds:
+    # housing_nn(:) = max(min(housing_nn(:),19.9),0.25)
+    housing_nn = jnp.clip(housing_nn, 0.25, 19.9)
 
     adjust_house = jnp.logical_not(jnp.isclose(myh, thehouse, atol=eq_atol, rtol=0.0))
     participate = mya > 0.0
@@ -114,7 +116,9 @@ def _my_auxv_cal_jit(
         lambda _: jax.lax.cond(participate, case_noadj_part, case_noadj_nopart, operand=None),
         operand=None,
     )
-    cash_nn = jnp.clip(cash_nn, cash_min, cash_max)
+    # MATLAB my_auxV_cal.m uses hard bounds:
+    # cash_nn(:) = max(min(cash_nn(:),19.9),0.25)
+    cash_nn = jnp.clip(cash_nn, 0.25, 19.9)
 
     # JAX/discrete-style path still uses the in-kernel interp2 implementation here.
     # MATLAB-like external interpolator objects are handled in mymain_se.py for
