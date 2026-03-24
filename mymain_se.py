@@ -1,12 +1,4 @@
 """Approximate JAX/Python rewrite of MATLAB `mymain_se.m`.
-
-阅读指南：
-1) 先看 `mymain_se` 主函数（终值 -> 两个 backward loop）。
-2) 再看 `_solve_one_state_discrete`（单个状态点如何挑最优 choice）。
-3) 最后看 `AuxVParams + my_auxv_cal`（给定 choice 如何算目标值）。
-
-注意：这里用“离散候选网格搜索”替代了 MATLAB `fmincon` 连续优化，
-因此是近似求解而非完全数值等价。
 """
 
 from __future__ import annotations
@@ -15,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 import importlib.util
 from typing import Callable
+from scipy.io import savemat
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +16,7 @@ import scipy.io as sio
 from scipy.io import loadmat
 from scipy.interpolate import RectBivariateSpline, RegularGridInterpolator
 from scipy.optimize import minimize  # kept for other potential uses
-
+jax.config.update('jax_enable_x64',True)
 # Import fmincon for MATLAB-like nonlinear optimization
 from fmincon import fmincon
 from my_auxv_cal import AuxVParams, my_auxv_cal, _my_auxv_cal_jit
@@ -151,16 +144,16 @@ def _income_growth(fp: FixedParams, lcfg: LifeCfg, t: int) -> tuple[float, float
     return 1.0, float(np.exp((f_y1 + f_y1_2) / (f_y2 + f_y2_2) - 1.0))
 
 
-def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray, interp_method: str = "linear") -> Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    """把下一期价值函数数组封装成可调用 model_fn(housing, cash)。"""
-    from interp2 import interp2_regular
-
-    def model_fn(housing_nn: jnp.ndarray, cash_nn: jnp.ndarray) -> jnp.ndarray:
-        # 注意插值轴：x=ghouse, y=gcash, V shape=(len(y), len(x))
+#def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray, interp_method: str = "linear") -> Callable[[jnp.ndarray, #jnp.ndarray], jnp.ndarray]:
+#    """把下一期价值函数数组封装成可调用 model_fn(housing, cash)。"""
+#    from interp2 import interp2_regular
+#
+#    def model_fn(housing_nn: jnp.ndarray, cash_nn: jnp.ndarray) -> jnp.ndarray:
+#        # 注意插值轴：x=ghouse, y=gcash, V shape=(len(y), len(x))
         # v_next 在本实现中已是 (ncash, nh) = (len(gcash), len(ghouse))，不应再转置。
-        return interp2_regular(ghouse, gcash, v_next, housing_nn, cash_nn, method=interp_method, bounds="clip")
+#        return interp2_regular(ghouse, gcash, v_next, housing_nn, cash_nn, method=interp_method, bounds="clip")
 
-    return model_fn
+#    return model_fn
 
 
 
@@ -172,7 +165,7 @@ def _build_model_fn_linear_np(v_next_np: np.ndarray, gcash_np: np.ndarray, ghous
         v_next_np,
         method=method,
         bounds_error=False,
-        fill_value=np.nan,
+        fill_value=None,###np.nan还是None?
     )
 
     def model_fn(housing_nn: np.ndarray, cash_nn: np.ndarray) -> np.ndarray:
@@ -240,19 +233,23 @@ def _my_auxv_cal_np(
 
     cash_nn = np.clip(cash_nn, p.cash_min, p.cash_max)
     int_v = model_fn_np(housing_nn, cash_nn)
-    eps = 1e-8
-    int_v = np.where(np.isfinite(int_v), int_v, eps)
-    int_v = np.maximum(int_v, eps)
+    
+    #eps = 1e-8
+    #int_v = np.where(np.isfinite(int_v), int_v, eps)
+    #int_v = np.maximum(int_v, eps)
     surv = float(np.asarray(p.survprob)[p.t] if np.asarray(p.survprob).ndim == 1 else np.asarray(p.survprob)[p.t, 0])
     aux_vv = float(weights @ (int_v ** (1.0 - p.rho))) * surv
-    if not np.isfinite(aux_vv) or aux_vv <= eps:
-        aux_vv = eps
+    #if not np.isfinite(aux_vv) or aux_vv <= eps:
+    #    aux_vv = eps
     core = u + p.delta * (aux_vv ** (1.0 / p.theta))
-    if not np.isfinite(core) or core <= eps:
-        core = eps
+    #if not np.isfinite(core) or core <= eps:
+    #   core = eps
     return -(core ** p.psi_2)
-
-
+    '''
+    surv = float(np.asarray(p.survprob)[p.t] if np.asarray(p.survprob).ndim == 1 else np.asarray(p.survprob)[p.t, 0])
+    aux_vv = (weights @ (int_v ** (1.0 - rho))) * surv
+    return -((u + delta * (aux_vv ** (1.0 / theta))) ** psi_2)
+    '''
 
 
 def _solve_one_state_continuous(
@@ -451,13 +448,13 @@ def _solve_one_state_continuous2(
         xo[2] = np.clip(xo[2], h_lb, h_ub)
         x0 = xo
 
-    thecash_j = jnp.asarray(thecash, dtype=jnp.float32)
-    thehouse_j = jnp.asarray(thehouse, dtype=jnp.float32)
+    thecash_j = jnp.asarray(thecash, dtype=jnp.float64)
+    thehouse_j = jnp.asarray(thehouse, dtype=jnp.float64)
 
     def _obj_jax(xv: jnp.ndarray) -> jnp.ndarray:
         # _my_auxv_cal_jit has many keyword-only args; route through `my_auxv_cal`
         # to keep signature aligned and avoid positional-argument mismatch.
-        return my_auxv_cal(jnp.asarray(xv, dtype=jnp.float32), aux_params, thecash_j, thehouse_j)
+        return my_auxv_cal(jnp.asarray(xv, dtype=jnp.float64), aux_params, thecash_j, thehouse_j)
 
     grad_obj = jax.jit(jax.grad(_obj_jax))
 
@@ -480,10 +477,10 @@ def _solve_one_state_continuous2(
 
     class _CyIpoptNLP:
         def objective(self, x):
-            return float(_obj_jax(jnp.asarray(x, dtype=jnp.float32)))
+            return float(_obj_jax(jnp.asarray(x, dtype=jnp.float64)))
 
         def gradient(self, x):
-            return np.asarray(grad_obj(jnp.asarray(x, dtype=jnp.float32)), dtype=float)
+            return np.asarray(grad_obj(jnp.asarray(x, dtype=jnp.float64)), dtype=float)
 
         def constraints(self, x):
             return _cons_np(x)
@@ -533,7 +530,7 @@ def _gpu_cont_project(
     c, a, h = v[0], v[1], v[2]
     c_cap = jnp.where(buy_or_zero, jnp.maximum(0.25, b - h), jnp.maximum(0.25, b))
     c = jnp.clip(jnp.minimum(c, c_cap), c_lb, c_ub)
-    return jnp.array([c, a, h], dtype=jnp.float32)
+    return jnp.array([c, a, h], dtype=jnp.float64)
 
 
 @jax.jit
@@ -604,7 +601,7 @@ def _gpu_cont_obj(
             interp_method=method,
         )
 
-    code = jnp.asarray(interp_method_code, dtype=jnp.int32)
+    code = jnp.asarray(interp_method_code, dtype=jnp.int64)
     code = jnp.clip(code, 0, 3)
     return jax.lax.switch(
         code,
@@ -712,7 +709,7 @@ def _gpu_cont_batch_optimize(
         )
 
     x0 = proj_vmap(x, lb, ub, b_vec, c_lb, c_ub, buy_or_zero)
-    step_size = jnp.float32(0.001)
+    step_size = jnp.float64(0.01)#0.01
 
     def _iter_body(_i, x_curr):
         g = grad_vmap(x_curr)
@@ -735,7 +732,7 @@ def _solve_one_state_gpu_continuous(
     minhouse2: float,
     x0_override: np.ndarray | None = None,
     maxiter: int = 1,
-    step_size: float = 0.04,
+    step_size: float = 0.01,
 ) -> tuple[float, float, float, float]:
     """Projected gradient solver with JAX autodiff (continuous choices, GPU-friendly math path)."""
     if b < 0.25:
@@ -765,37 +762,37 @@ def _solve_one_state_gpu_continuous(
         xo = np.asarray(x0_override, dtype=float).reshape(3)
         x0 = xo
 
-    lb = jnp.array([c_lb, a_lb, h_lb], dtype=jnp.float32)
-    ub = jnp.array([c_ub, a_ub, h_ub], dtype=jnp.float32)
-    x = jnp.asarray(x0, dtype=jnp.float32)
+    lb = jnp.array([c_lb, a_lb, h_lb], dtype=jnp.float64)
+    ub = jnp.array([c_ub, a_ub, h_ub], dtype=jnp.float64)
+    x = jnp.asarray(x0, dtype=jnp.float64)
 
     buy_or_zero = h_mode in {"buy", "zero"}
-    thecash32 = jnp.asarray(thecash, dtype=jnp.float32)
-    thehouse32 = jnp.asarray(thehouse, dtype=jnp.float32)
+    thecash32 = jnp.asarray(thecash, dtype=jnp.float64)
+    thehouse32 = jnp.asarray(thehouse, dtype=jnp.float64)
     aux_args = (
-        jnp.asarray(aux_params.t, dtype=jnp.int32),
-        jnp.asarray(aux_params.rho, dtype=jnp.float32),
-        jnp.asarray(aux_params.delta, dtype=jnp.float32),
-        jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
-        jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
-        jnp.asarray(aux_params.theta, dtype=jnp.float32),
-        jnp.asarray(aux_params.gyp, dtype=jnp.float32),
-        jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
-        jnp.asarray(aux_params.ppt, dtype=jnp.float32),
-        jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
-        jnp.asarray(aux_params.otcost, dtype=jnp.float32),
-        jnp.asarray(aux_params.income, dtype=jnp.float32),
-        jnp.asarray(aux_params.survprob, dtype=jnp.float32),
-        jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
-        jnp.asarray(aux_params.r, dtype=jnp.float32),
-        jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
-        jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
-        jnp.asarray(aux_params.house_min, dtype=jnp.float32),
-        jnp.asarray(aux_params.house_max, dtype=jnp.float32),
-        jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
-        jnp.asarray(aux_params.v_next, dtype=jnp.float32),
-        jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
-        jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
+        jnp.asarray(aux_params.t, dtype=jnp.int64),
+        jnp.asarray(aux_params.rho, dtype=jnp.float64),
+        jnp.asarray(aux_params.delta, dtype=jnp.float64),
+        jnp.asarray(aux_params.psi_1, dtype=jnp.float64),
+        jnp.asarray(aux_params.psi_2, dtype=jnp.float64),
+        jnp.asarray(aux_params.theta, dtype=jnp.float64),
+        jnp.asarray(aux_params.gyp, dtype=jnp.float64),
+        jnp.asarray(aux_params.adjcost, dtype=jnp.float64),
+        jnp.asarray(aux_params.ppt, dtype=jnp.float64),
+        jnp.asarray(aux_params.ppcost, dtype=jnp.float64),
+        jnp.asarray(aux_params.otcost, dtype=jnp.float64),
+        jnp.asarray(aux_params.income, dtype=jnp.float64),
+        jnp.asarray(aux_params.survprob, dtype=jnp.float64),
+        jnp.asarray(aux_params.gret_sh, dtype=jnp.float64),
+        jnp.asarray(aux_params.r, dtype=jnp.float64),
+        jnp.asarray(aux_params.cash_min, dtype=jnp.float64),
+        jnp.asarray(aux_params.cash_max, dtype=jnp.float64),
+        jnp.asarray(aux_params.house_min, dtype=jnp.float64),
+        jnp.asarray(aux_params.house_max, dtype=jnp.float64),
+        jnp.asarray(aux_params.eq_atol, dtype=jnp.float64),
+        jnp.asarray(aux_params.v_next, dtype=jnp.float64),
+        jnp.asarray(aux_params.gcash_grid, dtype=jnp.float64),
+        jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float64),
     )
 
     interp_method_code = {"linear": 0, "nearest": 1, "cubic": 2, "spline": 3}.get(aux_params.interp_method, 0)
@@ -864,13 +861,16 @@ def mymain_se(
     lcfg: LifeCfg = LifeCfg(),
     fp: FixedParams = FixedParams(),
     solver_mode: str = "gpu",
-    continuous_maxiter: int = 80,
+    continuous_maxiter: int = 1000,
     continuous_ftol: float = 1e-6,
-    continuous_constraint_tol: float | None = 1e-2,
+    continuous_constraint_tol: float | None = 1e-6,
     interp_method: str = "linear",
     surv_mat_path: str = "surv.mat",
-    save_convergence_diag: bool = False,
+    save_convergence_diag: bool = True,
     convergence_diag_path: str = "python_convergence_diag.mat",
+    return_value: bool = True,####测试用新加的
+    gcash_override=None,####测试用新加的
+    ghouse_override=None,####测试用新加的
 ):
     """主求解函数，对应 MATLAB `mymain_se`。
 
@@ -893,12 +893,29 @@ def mymain_se(
     # GPU-continuous JAX interpolation path is guaranteed for linear/nearest;
     # gracefully downgrade cubic/spline to linear to avoid backend mismatch.
     gpu_interp_method = interp_method
-    if solver_mode == "gpu_continuous" and interp_method in {"cubic", "spline"}:
-        gpu_interp_method = "linear"
+    #if solver_mode == "gpu_continuous" and interp_method in {"cubic", "spline"}:
+        #gpu_interp_method = "linear"
     interp_method_code = {"linear": 0, "nearest": 1, "cubic": 2, "spline": 3}[gpu_interp_method]
 
     tn = int(lcfg.td - lcfg.tb + 1)
-    gcash, ghouse = _build_state_grids(fp, gcfg)
+    #gcash, ghouse = _build_state_grids(fp, gcfg)   这是本来的，因为测试用先改掉
+    
+    if gcash_override is None or ghouse_override is None:
+        gcash, ghouse = _build_state_grids(fp, gcfg)
+    else:
+        gcash = jnp.asarray(gcash_override, dtype=jnp.float64).reshape(-1)
+        ghouse = jnp.asarray(ghouse_override, dtype=jnp.float64).reshape(-1)
+
+    if gcash.size != gcfg.ncash:
+        raise ValueError(f"gcash_override size {gcash.size} != gcfg.ncash {gcfg.ncash}")
+    if ghouse.size != gcfg.nh:
+        raise ValueError(f"ghouse_override size {ghouse.size} != gcfg.nh {gcfg.nh}")
+
+    if not np.all(np.diff(np.asarray(gcash)) > 0):
+        raise ValueError("gcash_override must be strictly increasing")
+    if not np.all(np.diff(np.asarray(ghouse)) > 0):
+        raise ValueError("ghouse_override must be strictly increasing")
+################        
     gcash_np = np.asarray(gcash, dtype=float)
     ghouse_np = np.asarray(ghouse, dtype=float)
     cash_min_grid, cash_max_grid = float(gcash_np[0]), float(gcash_np[-1])
@@ -914,10 +931,10 @@ def mymain_se(
     weig = np.asarray(weig2)[0, :].reshape(-1)
     gret_sh = _gret_sh(fp, grid, weig, mu, muh, gcfg.n)
 
-    C = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
-    A = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
-    H = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
-    V = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float32)
+    C = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
+    A = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
+    H = jnp.ones((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
+    V = jnp.zeros((gcfg.ncash, gcfg.nh, tn), dtype=jnp.float64)
     C1, A1, H1, V1 = C, A, H, V
 
     # 终值条件：最后一期把可变现资源用于消费
@@ -1043,20 +1060,20 @@ def mymain_se(
 
     def _solve_case_batch_gpu_cont(aux_params: AuxVParams, ppc: float, otc: float, minh2: float, *, h_mode: str, can_participate: bool, budget_fn, interp_method_code: int):
         """Batch solve all states for gpu_continuous mode (A: batch states)."""
-        b_vec = jnp.asarray(budget_fn(cash_flat, house_flat, ppc, otc), dtype=jnp.float32)
+        b_vec = jnp.asarray(budget_fn(cash_flat, house_flat, ppc, otc), dtype=jnp.float64)
         c_lb = jnp.full_like(b_vec, 0.25)
         c_ub = jnp.maximum(b_vec, 0.25)
 
         if h_mode == "keep":
-            h_lb = jnp.asarray(house_flat, dtype=jnp.float32)
-            h_ub = jnp.asarray(house_flat, dtype=jnp.float32)
+            h_lb = jnp.asarray(house_flat, dtype=jnp.float64)
+            h_ub = jnp.asarray(house_flat, dtype=jnp.float64)
             buy_or_zero = False
         elif h_mode == "zero":
             h_lb = jnp.zeros_like(b_vec)
             h_ub = jnp.zeros_like(b_vec)
             buy_or_zero = True
         else:
-            h_lb = jnp.full_like(b_vec, jnp.asarray(minh2, dtype=jnp.float32))
+            h_lb = jnp.full_like(b_vec, jnp.asarray(minh2, dtype=jnp.float64))
             h_ub = jnp.full_like(b_vec, float(fp.maxhouse))
             buy_or_zero = True
 
@@ -1068,12 +1085,25 @@ def mymain_se(
             a_lb = jnp.zeros_like(b_vec)
             a_ub = jnp.zeros_like(b_vec)
             a0 = jnp.zeros_like(b_vec)
-
+        if h_mode == "keep":
+            h0_raw = h_lb
+        elif h_mode == "zero":
+            h0_raw = jnp.zeros_like(b_vec)
+        else:
+            h0_raw = jnp.minimum(
+                0.1 * b_vec, #0.5
+                jnp.asarray(float(fp.maxhouse), dtype=jnp.float64),
+            )
         h0 = jnp.where(
             jnp.isclose(h_lb, h_ub),
             h_lb,
-            jnp.clip(jnp.where(h_mode == "buy", jnp.asarray(minh2, dtype=jnp.float32), 0.0), h_lb, h_ub),
+            jnp.clip(h0_raw, h_lb, h_ub),
         )
+        #h0 = jnp.where(
+            #jnp.isclose(h_lb, h_ub),
+            #h_lb,
+            #jnp.clip(jnp.where(h_mode == "buy", jnp.asarray(minh2, dtype=jnp.float32), 0.0), h_lb, h_ub),
+        #)
         c0_buyzero = jnp.clip(0.5 * jnp.maximum(b_vec - h0, c_lb), c_lb, c_ub)
         c0_keep = jnp.clip(0.5 * jnp.maximum(b_vec, c_lb), c_lb, c_ub)
         c0 = jnp.where(jnp.asarray(buy_or_zero), c0_buyzero, c0_keep)
@@ -1082,32 +1112,32 @@ def mymain_se(
         lb = jnp.stack([c_lb, a_lb, h_lb], axis=1)
         ub = jnp.stack([c_ub, a_ub, h_ub], axis=1)
 
-        thecash_vec = jnp.asarray(cash_flat, dtype=jnp.float32)
-        thehouse_vec = jnp.asarray(house_flat, dtype=jnp.float32)
+        thecash_vec = jnp.asarray(cash_flat, dtype=jnp.float64)
+        thehouse_vec = jnp.asarray(house_flat, dtype=jnp.float64)
         aux_args = (
-            jnp.asarray(aux_params.t, dtype=jnp.int32),
-            jnp.asarray(aux_params.rho, dtype=jnp.float32),
-            jnp.asarray(aux_params.delta, dtype=jnp.float32),
-            jnp.asarray(aux_params.psi_1, dtype=jnp.float32),
-            jnp.asarray(aux_params.psi_2, dtype=jnp.float32),
-            jnp.asarray(aux_params.theta, dtype=jnp.float32),
-            jnp.asarray(aux_params.gyp, dtype=jnp.float32),
-            jnp.asarray(aux_params.adjcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.ppt, dtype=jnp.float32),
-            jnp.asarray(aux_params.ppcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.otcost, dtype=jnp.float32),
-            jnp.asarray(aux_params.income, dtype=jnp.float32),
-            jnp.asarray(aux_params.survprob, dtype=jnp.float32),
-            jnp.asarray(aux_params.gret_sh, dtype=jnp.float32),
-            jnp.asarray(aux_params.r, dtype=jnp.float32),
-            jnp.asarray(aux_params.cash_min, dtype=jnp.float32),
-            jnp.asarray(aux_params.cash_max, dtype=jnp.float32),
-            jnp.asarray(aux_params.house_min, dtype=jnp.float32),
-            jnp.asarray(aux_params.house_max, dtype=jnp.float32),
-            jnp.asarray(aux_params.eq_atol, dtype=jnp.float32),
-            jnp.asarray(aux_params.v_next, dtype=jnp.float32),
-            jnp.asarray(aux_params.gcash_grid, dtype=jnp.float32),
-            jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float32),
+            jnp.asarray(aux_params.t, dtype=jnp.int64),
+            jnp.asarray(aux_params.rho, dtype=jnp.float64),
+            jnp.asarray(aux_params.delta, dtype=jnp.float64),
+            jnp.asarray(aux_params.psi_1, dtype=jnp.float64),
+            jnp.asarray(aux_params.psi_2, dtype=jnp.float64),
+            jnp.asarray(aux_params.theta, dtype=jnp.float64),
+            jnp.asarray(aux_params.gyp, dtype=jnp.float64),
+            jnp.asarray(aux_params.adjcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.ppt, dtype=jnp.float64),
+            jnp.asarray(aux_params.ppcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.otcost, dtype=jnp.float64),
+            jnp.asarray(aux_params.income, dtype=jnp.float64),
+            jnp.asarray(aux_params.survprob, dtype=jnp.float64),
+            jnp.asarray(aux_params.gret_sh, dtype=jnp.float64),
+            jnp.asarray(aux_params.r, dtype=jnp.float64),
+            jnp.asarray(aux_params.cash_min, dtype=jnp.float64),
+            jnp.asarray(aux_params.cash_max, dtype=jnp.float64),
+            jnp.asarray(aux_params.house_min, dtype=jnp.float64),
+            jnp.asarray(aux_params.house_max, dtype=jnp.float64),
+            jnp.asarray(aux_params.eq_atol, dtype=jnp.float64),
+            jnp.asarray(aux_params.v_next, dtype=jnp.float64),
+            jnp.asarray(aux_params.gcash_grid, dtype=jnp.float64),
+            jnp.asarray(aux_params.ghouse_grid, dtype=jnp.float64),
         )
 
         return _gpu_cont_batch_optimize(
@@ -1186,14 +1216,20 @@ def mymain_se(
 
     # GPU-continuous: move backward time loops to JAX scan to reduce Python dispatch.
     if solver_mode == "gpu_continuous":
-        t_seq = jnp.arange(tn - 2, -1, -1, dtype=jnp.int32)
+        debug_loop1_case = True
+        # 你想看的点：对应 MATLAB 的 (cash_idx=15, house_idx=1, t=1) 之类
+        # Python 用 0-based index
+        debug_cash_idx = 12
+        debug_house_idx = 10
+        debug_t = 39
+        t_seq = jnp.arange(tn - 2, -1, -1, dtype=jnp.int64)
 
         income1, gyp1, ppc_path1, otc_path1, minh2_path1 = _precompute_backward_paths(float(ppcost_in), 0.0)
-        income1_j = jnp.asarray(income1, dtype=jnp.float32)
-        gyp1_j = jnp.asarray(gyp1, dtype=jnp.float32)
-        ppc1_j = jnp.asarray(ppc_path1, dtype=jnp.float32)
-        otc1_j = jnp.asarray(otc_path1, dtype=jnp.float32)
-        minh1_j = jnp.asarray(minh2_path1, dtype=jnp.float32)
+        income1_j = jnp.asarray(income1, dtype=jnp.float64)
+        gyp1_j = jnp.asarray(gyp1, dtype=jnp.float64)
+        ppc1_j = jnp.asarray(ppc_path1, dtype=jnp.float64)
+        otc1_j = jnp.asarray(otc_path1, dtype=jnp.float64)
+        minh1_j = jnp.asarray(minh2_path1, dtype=jnp.float64)
 
         def _scan_loop1_body(v_next, xs):
             t, ppcost, otcost, income, gyp, minhouse2 = xs
@@ -1232,24 +1268,79 @@ def mymain_se(
             best_idx = jnp.argmax(case_stack[:, :, 3], axis=0)
             best = jnp.take_along_axis(case_stack, best_idx[None, :, None], axis=0)[0]
             best_grid = best.reshape(gcfg.ncash, gcfg.nh, 4)
-            return best_grid[:, :, 3], best_grid
-
-        _, best_seq1 = jax.lax.scan(
+            #新加的
+            
+            dbg_case_vals = None
+            dbg_best_idx = None
+            if debug_loop1_case:
+                case_grid = case_stack.reshape(6, gcfg.ncash, gcfg.nh, 4)
+                dbg_case_vals = case_grid[:, debug_cash_idx, debug_house_idx, :]   # shape (6,4)
+                dbg_best_idx = best_grid[debug_cash_idx, debug_house_idx, :]
+            return best_grid[:, :, 3], (best_grid, dbg_case_vals, dbg_best_idx, t, ppcost, otcost, income, gyp, minhouse2)
+            #return best_grid[:, :, 3], best_grid 原来的
+        ##原来是best_seq1
+        _, scan_out1 = jax.lax.scan(
             _scan_loop1_body,
             V[:, :, tn - 1],
             (t_seq, ppc1_j[t_seq], otc1_j[t_seq], income1_j[t_seq], gyp1_j[t_seq], minh1_j[t_seq]),
         )
+        best_seq1, dbg_case_seq1, dbg_best_seq1, dbg_t_seq1, dbg_ppc_seq1, dbg_otc_seq1, dbg_income_seq1, dbg_gyp_seq1, dbg_minh_seq1 = scan_out1  ###新加的
         C = C.at[:, :, t_seq].set(jnp.transpose(best_seq1[:, :, :, 0], (1, 2, 0)))
         A = A.at[:, :, t_seq].set(jnp.transpose(best_seq1[:, :, :, 1], (1, 2, 0)))
         H = H.at[:, :, t_seq].set(jnp.transpose(best_seq1[:, :, :, 2], (1, 2, 0)))
         V = V.at[:, :, t_seq].set(jnp.transpose(best_seq1[:, :, :, 3], (1, 2, 0)))
+        print("stored after assignment:",
+              float(C[12, 10, 39]),
+              float(A[12, 10, 39]),
+              float(H[12, 10, 39]),
+              float(V[12, 10, 39]))
+        ################
+        if debug_loop1_case:
+            dbg_case_seq1_np = np.asarray(dbg_case_seq1)
+            dbg_best_seq1_np = np.asarray(dbg_best_seq1)
+            dbg_t_seq1_np = np.asarray(dbg_t_seq1)
+            dbg_ppc_seq1_np = np.asarray(dbg_ppc_seq1)
+            dbg_otc_seq1_np = np.asarray(dbg_otc_seq1)
+            dbg_income_seq1_np = np.asarray(dbg_income_seq1)
+            dbg_gyp_seq1_np = np.asarray(dbg_gyp_seq1)
+            dbg_minh_seq1_np = np.asarray(dbg_minh_seq1)
 
+    # 找到你关心的那个 t
+            hit = np.where(dbg_t_seq1_np == debug_t)[0]
+            if len(hit) > 0:
+                kk = int(hit[0])
+
+                print("\n===== loop1 candidate-case debug (Python gpu_continuous) =====")
+                print(f"debug state: t={int(dbg_t_seq1_np[kk])}, cash_idx={debug_cash_idx}, house_idx={debug_house_idx}")
+                print(f"ppcost={dbg_ppc_seq1_np[kk]:.6f}, otcost={dbg_otc_seq1_np[kk]:.6f}, income={dbg_income_seq1_np[kk]:.6f}, gyp={dbg_gyp_seq1_np[kk]:.6f}, minhouse2={dbg_minh_seq1_np[kk]:.6f}")
+
+                case_names = [
+                    "1: buy + stock",
+                    "2: zero + stock",
+                    "3: buy + no_stock",
+                    "4: zero + no_stock",
+                    "5: keep + stock",
+                    "6: keep + no_stock",
+                ]
+
+        # dbg_case_seq1_np[kk] shape = (6,4)
+        # 每行是 [c, a, h, V]
+                for ci in range(6):
+                    c_val, a_val, h_val, v_val = dbg_case_seq1_np[kk, ci]
+                    print(f"{case_names[ci]:>18s} -> c={c_val:.8f}, a={a_val:.8f}, h={h_val:.8f}, V={v_val:.8f}")
+
+                b_c, b_a, b_h, b_v = dbg_best_seq1_np[kk]
+                print(f"best grid solution -> c={b_c:.8f}, a={b_a:.8f}, h={b_h:.8f}, V={b_v:.8f}")
+                print("==============================================================\n")
+            else:
+                print(f"[debug] requested debug_t={debug_t} not found in loop1 scan sequence.")
+        
         income2, gyp2, ppc_path2, otc_path2, minh2_path2 = _precompute_backward_paths(float(ppcost_in), float(otcost_in))
-        income2_j = jnp.asarray(income2, dtype=jnp.float32)
-        gyp2_j = jnp.asarray(gyp2, dtype=jnp.float32)
-        ppc2_j = jnp.asarray(ppc_path2, dtype=jnp.float32)
-        otc2_j = jnp.asarray(otc_path2, dtype=jnp.float32)
-        minh2_j = jnp.asarray(minh2_path2, dtype=jnp.float32)
+        income2_j = jnp.asarray(income2, dtype=jnp.float64)
+        gyp2_j = jnp.asarray(gyp2, dtype=jnp.float64)
+        ppc2_j = jnp.asarray(ppc_path2, dtype=jnp.float64)
+        otc2_j = jnp.asarray(otc_path2, dtype=jnp.float64)
+        minh2_j = jnp.asarray(minh2_path2, dtype=jnp.float64)
         vpay_seq = jnp.transpose(V[:, :, 1:], (2, 0, 1))[::-1]
 
         def _scan_loop2_body(v1_next, xs):
@@ -1338,11 +1429,28 @@ def mymain_se(
         c_np, a_np, h_np = np.asarray(C), np.asarray(A), np.asarray(H)
         c1_np, a1_np, h1_np = np.asarray(C1), np.asarray(A1), np.asarray(H1)
         v_np, v1_np = np.asarray(V), np.asarray(V1)
+        savemat("fresh_jax_value_policy.mat", {
+            "V": v_np,
+            "V1": v1_np,
+            "C": c_np,
+            "A": a_np,
+            "H": h_np,
+            "C1": c1_np,
+            "A1": a1_np,
+            "H1": h1_np,
+            "gcash": np.asarray(gcash).reshape(-1, 1),
+            "ghouse": np.asarray(ghouse).reshape(-1, 1),
+        })
 
         save_data = {
             "C_py": c_np,
             "A_py": a_np,
             "H_py": h_np,
+            "C1_py": c1_np,
+            "A1_py": a1_np,
+            "H1_py": h1_np,
+            "V_py": v_np,
+            "V1_py": v1_np,
         }
         sio.savemat("python_quick_test_result.mat", save_data)
         print("\n>>> Python 决策矩阵已存入 python_quick_test_result.mat")
@@ -1351,7 +1459,9 @@ def mymain_se(
             diag_data = _build_convergence_diag(v_np, v1_np)
             sio.savemat(convergence_diag_path, {k: np.asarray(v) for k, v in diag_data.items()})
             print(f"\n>>> 收敛诊断已存入 {convergence_diag_path}")
-
+        
+        if return_value:
+            return c_np, a_np, h_np, c1_np, a1_np, h1_np, v_np, v1_np
         return c_np, a_np, h_np, c1_np, a1_np, h1_np
 
     # Loop 1: 已经支付过 one-time cost 的人群（批量化 state 维度）
@@ -1417,10 +1527,10 @@ def mymain_se(
             best_idx = jnp.argmax(case_stack[:, :, 3], axis=0)
             best = jnp.take_along_axis(case_stack, best_idx[None, :, None], axis=0)[0]
             best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
-        C = C.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float32))
-        A = A.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float32))
-        H = H.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float32))
-        V = V.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float32))
+        C = C.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float64))
+        A = A.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float64))
+        H = H.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float64))
+        V = V.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float64))
 
     # Loop 2: 未支付过 one-time cost 的人群（批量化 state 维度）
     # 对比“当期支付 otcost”与“继续不支付”两条路径，选价值更高者
@@ -1544,10 +1654,10 @@ def mymain_se(
             use_pay = pay_best[:, 3] >= nopay_best[:, 3]
             best = jnp.where(use_pay[:, None], pay_best, nopay_best)
             best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
-        C1 = C1.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float32))
-        A1 = A1.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float32))
-        H1 = H1.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float32))
-        V1 = V1.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float32))
+        C1 = C1.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float64))
+        A1 = A1.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float64))
+        H1 = H1.at[:, :, t].set(jnp.asarray(best_np[:, :, 2], dtype=jnp.float64))
+        V1 = V1.at[:, :, t].set(jnp.asarray(best_np[:, :, 3], dtype=jnp.float64))
 
     # MATLAB 中对极小房产选择做清零
     H = jnp.where(H < 1e-3, 0.0, H)
@@ -1559,4 +1669,21 @@ def mymain_se(
         diag_data = _build_convergence_diag(v_np, v1_np)
         sio.savemat(convergence_diag_path, {k: np.asarray(v) for k, v in diag_data.items()})
         print(f"\n>>> 收敛诊断已存入 {convergence_diag_path}")
+    else:
+        v_np, v1_np = np.asarray(V), np.asarray(V1)
+    if solver_mode == "continuous":
+        savemat("fresh_jax_value_policy_continuous.mat", {
+            "V": v_np,
+            "V1": v1_np,
+            "C": c_np,
+            "A": a_np,
+            "H": h_np,
+            "C1": c1_np,
+            "A1": a1_np,
+            "H1": h1_np,
+            "gcash": np.asarray(gcash).reshape(-1, 1),
+            "ghouse": np.asarray(ghouse).reshape(-1, 1),
+        })
+    if return_value:
+        return c_np, a_np, h_np, c1_np, a1_np, h1_np, v_np, v1_np
     return c_np, a_np, h_np, c1_np, a1_np, h1_np
