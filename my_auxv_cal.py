@@ -123,11 +123,7 @@ def _my_auxv_cal_jit(
     # JAX/discrete-style path still uses the in-kernel interp2 implementation here.
     # MATLAB-like external interpolator objects are handled in mymain_se.py for
     # continuous/continuous2/gpu_continuous paths.
-    # Some runtime environments only provide linear/nearest kernels in interp2.
-    # Gracefully downgrade cubic/spline requests to linear for robustness.
     interp_method_local = interp_method.lower()
-    if interp_method_local in ("cubic", "spline"):
-        interp_method_local = "linear"
     int_v = interp2_regular(
         ghouse_grid,
         gcash_grid,

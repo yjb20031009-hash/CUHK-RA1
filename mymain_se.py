@@ -1097,11 +1097,8 @@ def mymain_se(
     interp_method = interp_method.lower()
     if interp_method not in {"linear", "nearest", "cubic", "spline"}:
         raise ValueError("interp_method must be one of {'linear', 'nearest', 'cubic', 'spline'}")
-    # GPU-continuous JAX interpolation path is guaranteed for linear/nearest;
-    # gracefully downgrade cubic/spline to linear to avoid backend mismatch.
+    # Keep method aligned with caller choice for all solver modes.
     gpu_interp_method = interp_method
-    if solver_mode == "gpu_continuous" and interp_method in {"cubic", "spline"}:
-        gpu_interp_method = "linear"
     interp_method_code = {"linear": 0, "nearest": 1, "cubic": 2, "spline": 3}[gpu_interp_method]
     stage_sum = max(float(gpu_stage1_frac) + float(gpu_stage2_frac) + float(gpu_stage3_frac), 1e-12)
     stage1_frac_eff = float(gpu_stage1_frac) / stage_sum
