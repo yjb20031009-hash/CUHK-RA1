@@ -84,6 +84,20 @@ def _build_state_grids(fp: FixedParams, gcfg: GridCfg) -> tuple[jnp.ndarray, jnp
     return jnp.asarray(gcash), jnp.asarray(ghouse)
 
 
+def _build_state_grids_with_override(
+    fp: FixedParams,
+    gcfg: GridCfg,
+    gcash_override: np.ndarray | jnp.ndarray | None = None,
+    ghouse_override: np.ndarray | jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    gcash, ghouse = _build_state_grids(fp, gcfg)
+    if gcash_override is not None:
+        gcash = jnp.asarray(gcash_override, dtype=jnp.float64).reshape(-1)
+    if ghouse_override is not None:
+        ghouse = jnp.asarray(ghouse_override, dtype=jnp.float64).reshape(-1)
+    return gcash, ghouse
+
+
 def _minhouse2_normalized(fp: FixedParams) -> float:
     """最小购房门槛标准化（与 MATLAB 公式保持一致）。"""
     denom = np.exp(fp.incaa + fp.incb1 * 60 + fp.incb2 * 60**2 + fp.incb3 * 60**3) + np.exp(
@@ -1053,6 +1067,9 @@ def mymain_se(
     gpu_stage3_frac: float = 0.2,
     gpu_refine_steps: int = 20,
     gpu_case_gap_tol: float = 1e-3,
+    gpu_enable_scan_backward: bool = False,
+    gcash_override: np.ndarray | jnp.ndarray | None = None,
+    ghouse_override: np.ndarray | jnp.ndarray | None = None,
     surv_mat_path: str = "surv.mat",
     save_convergence_diag: bool = False,
     convergence_diag_path: str = "python_convergence_diag.mat",
@@ -1081,9 +1098,17 @@ def mymain_se(
     if solver_mode == "gpu_continuous" and interp_method in {"cubic", "spline"}:
         gpu_interp_method = "linear"
     interp_method_code = {"linear": 0, "nearest": 1, "cubic": 2, "spline": 3}[gpu_interp_method]
+    stage_sum = max(float(gpu_stage1_frac) + float(gpu_stage2_frac) + float(gpu_stage3_frac), 1e-12)
+    stage1_frac_eff = float(gpu_stage1_frac) / stage_sum
+    stage2_frac_eff = float(gpu_stage2_frac) / stage_sum
 
     tn = int(lcfg.td - lcfg.tb + 1)
-    gcash, ghouse = _build_state_grids(fp, gcfg)
+    gcash, ghouse = _build_state_grids_with_override(
+        fp,
+        gcfg,
+        gcash_override=gcash_override,
+        ghouse_override=ghouse_override,
+    )
     gcash_np = np.asarray(gcash, dtype=float)
     ghouse_np = np.asarray(ghouse, dtype=float)
     cash_min_grid, cash_max_grid = float(gcash_np[0]), float(gcash_np[-1])
@@ -1415,11 +1440,26 @@ def mymain_se(
             float(gpu_step_size_init),
             float(gpu_step_size_mid),
             float(gpu_step_size_final),
-            float(gpu_stage1_frac),
-            float(gpu_stage2_frac),
+            float(stage1_frac_eff),
+            float(stage2_frac_eff),
             *aux_args,
             int(interp_method_code),
         )
+        if int(gpu_refine_steps) > 0:
+            refine_pool = best[:, :3][None, :, :]
+            refined = _gpu_cont_batch_optimize_v2(
+                refine_pool, lb, ub, b_vec, c_lb, c_ub, buy_or_zero, thecash_vec, thehouse_vec,
+                int(gpu_refine_steps),
+                float(gpu_step_size_final),
+                float(gpu_step_size_final),
+                float(gpu_step_size_final),
+                1.0,
+                0.0,
+                *aux_args,
+                int(interp_method_code),
+            )
+            improve = refined[:, 3] > (best[:, 3] + float(gpu_case_gap_tol))
+            best = jnp.where(improve[:, None], refined, best)
         if gpu_add_boundary_candidates:
             best = _add_boundary_candidates(best, lb, ub, b_vec, buy_or_zero, thecash_vec, thehouse_vec, aux_args, interp_method_code)
         return best
@@ -1486,7 +1526,7 @@ def mymain_se(
         return out
 
     # GPU-continuous: move backward time loops to JAX scan to reduce Python dispatch.
-    if False and solver_mode == "gpu_continuous":
+    if gpu_enable_scan_backward and solver_mode == "gpu_continuous":
         t_seq = jnp.arange(tn - 2, -1, -1, dtype=jnp.int32)
 
         income1, gyp1, ppc_path1, otc_path1, minh2_path1 = _precompute_backward_paths(float(ppcost_in), 0.0)
