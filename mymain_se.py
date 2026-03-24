@@ -1884,6 +1884,22 @@ def mymain_se(
     H1 = jnp.where(H1 < 1e-3, 0.0, H1)
     c_np, a_np, h_np = np.asarray(C), np.asarray(A), np.asarray(H)
     c1_np, a1_np, h1_np = np.asarray(C1), np.asarray(A1), np.asarray(H1)
+    try:
+        val_c = float(C[5, 3, 0])
+        val_a = float(A[5, 3, 0])
+        val_h = float(H[5, 3, 0])
+        print(f"\n>>> 最终决策比对 (idx: 5, 3, 0): myc={val_c:.8f}, mya={val_a:.8f}, myh={val_h:.8f}")
+    except Exception as e:
+        print(f"\n>>> 打印决策值失败: {e}")
+
+    save_data = {
+        "C_py": c_np,
+        "A_py": a_np,
+        "H_py": h_np,
+    }
+    sio.savemat("python_quick_test_result.mat", save_data)
+    print("\n>>> Python 决策矩阵已存入 python_quick_test_result.mat")
+
     if save_convergence_diag:
         v_np, v1_np = np.asarray(V), np.asarray(V1)
         diag_data = _build_convergence_diag(v_np, v1_np)
