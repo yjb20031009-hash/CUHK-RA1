@@ -411,6 +411,15 @@ def my_estimation_prepost(
             return np.transpose(arr, (1, 0, 2))
         raise ValueError(f"policy array has incompatible shape={arr.shape}, expected (ncash={cfg.ncash}, nh={cfg.nh}, tn)")
 
+    def _debug_policy_snapshot(C: np.ndarray, A: np.ndarray, H: np.ndarray, *, tag: str) -> None:
+        try:
+            print(
+                f">>> [{tag}] 最终决策比对 (idx: 5, 3, 0): "
+                f"myc={float(C[5, 3, 0]):.8f}, mya={float(A[5, 3, 0]):.8f}, myh={float(H[5, 3, 0]):.8f}"
+            )
+        except Exception as e:
+            print(f">>> [{tag}] 打印决策值失败: {e}")
+
     def load_or_solve_policy(ppt: float, path: str):
         if recompute_policy or (not os.path.exists(path)):
             print(f">>> [policy] solving via mymain_se (ppt={ppt:.6f}, path='{path}')")
@@ -433,12 +442,14 @@ def my_estimation_prepost(
             )
             C, A, H = map(_coerce_policy_shape, (np.asarray(C), np.asarray(A), np.asarray(H)))
             C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(C1), np.asarray(A1), np.asarray(H1)))
+            _debug_policy_snapshot(C, A, H, tag="policy-solved")
             savemat(path, {"C": C, "A": A, "H": H, "C1": C1, "A1": A1, "H1": H1})
             return C, A, H, C1, A1, H1
         print(f">>> [policy] loading cached policy (ppt={ppt:.6f}, path='{path}')")
         pmat = loadmat(path)
         C, A, H = map(_coerce_policy_shape, (np.asarray(pmat["C"]), np.asarray(pmat["A"]), np.asarray(pmat["H"])))
         C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(pmat["C1"]), np.asarray(pmat["A1"]), np.asarray(pmat["H1"])))
+        _debug_policy_snapshot(C, A, H, tag="policy-loaded")
         return C, A, H, C1, A1, H1
 
     # === MATLAB section: 根据 policy + 样本做一期仿真 ===
