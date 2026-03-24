@@ -413,6 +413,7 @@ def my_estimation_prepost(
 
     def load_or_solve_policy(ppt: float, path: str):
         if recompute_policy or (not os.path.exists(path)):
+            print(f">>> [policy] solving via mymain_se (ppt={ppt:.6f}, path='{path}')")
             C, A, H, C1, A1, H1 = mymain_se_fn(
                 ppt,
                 ppcost,
@@ -434,6 +435,7 @@ def my_estimation_prepost(
             C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(C1), np.asarray(A1), np.asarray(H1)))
             savemat(path, {"C": C, "A": A, "H": H, "C1": C1, "A1": A1, "H1": H1})
             return C, A, H, C1, A1, H1
+        print(f">>> [policy] loading cached policy (ppt={ppt:.6f}, path='{path}')")
         pmat = loadmat(path)
         C, A, H = map(_coerce_policy_shape, (np.asarray(pmat["C"]), np.asarray(pmat["A"]), np.asarray(pmat["H"])))
         C1, A1, H1 = map(_coerce_policy_shape, (np.asarray(pmat["C1"]), np.asarray(pmat["A1"]), np.asarray(pmat["H1"])))
