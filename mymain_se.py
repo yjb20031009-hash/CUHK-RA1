@@ -272,6 +272,47 @@ def _my_auxv_cal_np(
     return -(core ** p.psi_2)
 
 
+def evaluate_state_choice_with_context(
+    *,
+    label: str,
+    choice: np.ndarray | jnp.ndarray,
+    thecash: float,
+    thehouse: float,
+    aux_params: AuxVParams,
+    model_fn_np: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    interp_method: str,
+) -> dict[str, float | str]:
+    """统一口径地评估一个状态-决策点，便于排查 value 量级分叉。
+
+    Notes:
+    - `raw_objective` 为 `_my_auxv_cal_np` 直接输出（目标函数口径）。
+    - `value` 为 `-raw_objective`（策略表常用口径）。
+    """
+    x = np.asarray(choice, dtype=float).reshape(3)
+    raw_objective = float(_my_auxv_cal_np(x, aux_params, float(thecash), float(thehouse), model_fn_np))
+    return {
+        "label": label,
+        "t": float(aux_params.t),
+        "gyp": float(aux_params.gyp),
+        "income": float(aux_params.income),
+        "ppcost": float(aux_params.ppcost),
+        "otcost": float(aux_params.otcost),
+        "rho": float(aux_params.rho),
+        "delta": float(aux_params.delta),
+        "psi_1": float(aux_params.psi_1),
+        "psi_2": float(aux_params.psi_2),
+        "cash": float(thecash),
+        "house": float(thehouse),
+        "myc": float(x[0]),
+        "mya": float(x[1]),
+        "myh": float(x[2]),
+        "raw_objective": raw_objective,
+        "value": float(-raw_objective),
+        "interp_method": str(interp_method),
+        "value_is_negated": "yes",
+    }
+
+
 
 
 def _solve_one_state_continuous(
