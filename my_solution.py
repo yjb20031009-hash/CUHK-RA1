@@ -132,6 +132,7 @@ def run_my_solution(
     run_5param: bool = True,
     run_7param: bool = True,
     run_8param: bool = False,
+    quick_test_recompute_policy: bool = True,
 ) -> MySolutionResult:
     """Run optimization scenarios translated from MATLAB `my_solution.m`."""
     opts = opts or CMAESOptions(max_iter=8, tol_x=1e-2, stop_fitness=1e-2, lbounds=0.01, ubounds=0.99)
@@ -147,6 +148,7 @@ def run_my_solution(
         quick_test_value, _, _ = my_estimation_prepostdid1_high(
             quick_eval_param,
             moments_path=moments_high_path,
+            recompute_policy=quick_test_recompute_policy,
         )
 
     if run_5param:
