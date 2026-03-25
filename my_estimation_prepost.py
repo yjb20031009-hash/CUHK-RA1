@@ -1485,10 +1485,10 @@ def mymain_se(
             h_lb = jnp.zeros_like(thecash_vec)
             h_ub = jnp.zeros_like(thecash_vec)
         else:  # buy
-            h_lb = jnp.full_like(thecash_vec, minhouse2)
+            h_lb = jnp.full_like(thecash_vec, jnp.asarray(minh2, dtype=jnp.float64))
             h_ub = jnp.minimum(
-                jnp.full_like(thecash_vec, aux.house_max),
-                jnp.maximum(jnp.full_like(thecash_vec, minhouse2), b_vec - c_lb),
+                jnp.full_like(thecash_vec, jnp.asarray(aux_params.house_max, dtype=jnp.float64)),
+                jnp.maximum(jnp.full_like(thecash_vec, jnp.asarray(minh2, dtype=jnp.float64)), b_vec - c_lb),
             )
 
         lb = jnp.stack([c_lb, a_lb, h_lb], axis=1)
