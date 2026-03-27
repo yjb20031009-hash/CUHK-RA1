@@ -225,7 +225,8 @@ def _my_auxv_cal_np(
     stock_ret = gret_sh[:, 0]
     weights = gret_sh[:, 2]
 
-    housing_nn = np.clip(myh * house_gross / p.gyp, p.house_min, p.house_max)
+    # Match MATLAB/my_auxv_cal_jit hard bounds used in policy recursion
+    housing_nn = np.clip(myh * house_gross / p.gyp, 0.25, 19.9)
     adjust_house = not np.isclose(myh, thehouse, atol=p.eq_atol, rtol=0.0)
     participate = mya > 0.0
 
@@ -242,7 +243,8 @@ def _my_auxv_cal_np(
         sav = thecash + thehouse * (-p.ppt) - myc
         cash_nn = np.full_like(stock_ret, sav * p.r / p.gyp + p.income)
 
-    cash_nn = np.clip(cash_nn, p.cash_min, p.cash_max)
+    # Match MATLAB/my_auxv_cal_jit hard bounds used in policy recursion
+    cash_nn = np.clip(cash_nn, 0.25, 19.9)
     int_v = model_fn_np(housing_nn, cash_nn)
     eps = 1e-8
     int_v = np.where(np.isfinite(int_v), int_v, eps)
@@ -1145,10 +1147,10 @@ def mymain_se(
     continuous_maxiter: int = 80,
     continuous_ftol: float = 1e-6,
     continuous_constraint_tol: float | None = 1e-2,
-    interp_method: str = "linear",
+    interp_method: str | None = None,
     gpu_n_starts: int = 4,
-    gpu_use_warmstart: bool = True,
-    gpu_add_boundary_candidates: bool = True,
+    gpu_use_warmstart: bool | None = None,
+    gpu_add_boundary_candidates: bool | None = None,
     gpu_step_size_init: float = 0.05,
     gpu_step_size_mid: float = 0.02,
     gpu_step_size_final: float = 0.005,
@@ -1180,9 +1182,18 @@ def mymain_se(
     elif solver_mode not in {"discrete", "continuous", "continuous2", "gpu_continuous"}:
         raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous', 'continuous2', 'gpu_continuous'}")
 
+    if interp_method is None:
+        # Match MATLAB baseline behavior in gpu_continuous mode unless explicitly overridden.
+        interp_method = "spline" if solver_mode == "gpu_continuous" else "linear"
     interp_method = interp_method.lower()
     if interp_method not in {"linear", "nearest", "cubic", "spline"}:
         raise ValueError("interp_method must be one of {'linear', 'nearest', 'cubic', 'spline'}")
+    if gpu_use_warmstart is None:
+        # Warmstart can make path comparisons against MATLAB baseline harder.
+        gpu_use_warmstart = solver_mode != "gpu_continuous"
+    if gpu_add_boundary_candidates is None:
+        # Keep gpu_continuous defaults closer to the plain optimizer path for debugging parity.
+        gpu_add_boundary_candidates = solver_mode != "gpu_continuous"
     # GPU-continuous JAX interpolation path is guaranteed for linear/nearest;
     # gracefully downgrade cubic/spline to linear to avoid backend mismatch.
     gpu_interp_method = interp_method
@@ -1485,10 +1496,10 @@ def mymain_se(
             h_lb = jnp.zeros_like(thecash_vec)
             h_ub = jnp.zeros_like(thecash_vec)
         else:  # buy
-            h_lb = jnp.full_like(thecash_vec, minhouse2)
+            h_lb = jnp.full_like(thecash_vec, jnp.asarray(minh2, dtype=jnp.float64))
             h_ub = jnp.minimum(
-                jnp.full_like(thecash_vec, aux.house_max),
-                jnp.maximum(jnp.full_like(thecash_vec, minhouse2), b_vec - c_lb),
+                jnp.full_like(thecash_vec, jnp.asarray(aux_params.house_max, dtype=jnp.float64)),
+                jnp.maximum(jnp.full_like(thecash_vec, jnp.asarray(minh2, dtype=jnp.float64)), b_vec - c_lb),
             )
 
         lb = jnp.stack([c_lb, a_lb, h_lb], axis=1)
@@ -2174,18 +2185,21 @@ def mymain_se(
                     (19, 9),
                 ]
                 case_names = [
-                    "buy+stock",
-                    "zero+stock",
-                    "buy+nostock",
-                    "zero+nostock",
-                    "keep+stock",
-                    "keep+nostock",
+                    "buy+stock+pay",
+                    "zero+stock+pay",
+                    "buy+nostock+pay",
+                    "zero+nostock+pay",
+                    "keep+stock+pay",
+                    "keep+nostock+pay",
+                    "buy+nostock+nopay",
+                    "zero+nostock+nopay",
+                    "keep+nostock+nopay",
                 ]
             
-                cs_np = np.asarray(case_stack)   # shape = (6, n_state, 4)
+                cs_np = np.asarray(all_stack)   # shape = (9, n_state, 4)
                 best_idx_dbg = np.argmax(cs_np[:, :, 3], axis=0)
             
-                print("\n===== REAL batch-v2 loop 2 6-case candidate table at T-1 =====")
+                print("\n===== REAL batch-v2 loop2 9-case candidate table at T-1 =====")
                 for i_py, j_py in debug_points:
                     flat_idx = i_py * gcfg.nh + j_py
                     cash_val = float(gcash[i_py])
