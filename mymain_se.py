@@ -2176,18 +2176,21 @@ def mymain_se(
                     (19, 9),
                 ]
                 case_names = [
-                    "buy+stock",
-                    "zero+stock",
-                    "buy+nostock",
-                    "zero+nostock",
-                    "keep+stock",
-                    "keep+nostock",
+                    "buy+stock+pay",
+                    "zero+stock+pay",
+                    "buy+nostock+pay",
+                    "zero+nostock+pay",
+                    "keep+stock+pay",
+                    "keep+nostock+pay",
+                    "buy+nostock+nopay",
+                    "zero+nostock+nopay",
+                    "keep+nostock+nopay",
                 ]
             
-                cs_np = np.asarray(case_stack)   # shape = (6, n_state, 4)
+                cs_np = np.asarray(all_stack)   # shape = (9, n_state, 4)
                 best_idx_dbg = np.argmax(cs_np[:, :, 3], axis=0)
             
-                print("\n===== REAL batch-v2 loop 2 6-case candidate table at T-1 =====")
+                print("\n===== REAL batch-v2 loop2 9-case candidate table at T-1 =====")
                 for i_py, j_py in debug_points:
                     flat_idx = i_py * gcfg.nh + j_py
                     cash_val = float(gcash[i_py])
