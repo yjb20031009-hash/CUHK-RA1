@@ -1147,10 +1147,10 @@ def mymain_se(
     continuous_maxiter: int = 80,
     continuous_ftol: float = 1e-6,
     continuous_constraint_tol: float | None = 1e-2,
-    interp_method: str = "linear",
+    interp_method: str | None = None,
     gpu_n_starts: int = 4,
-    gpu_use_warmstart: bool = True,
-    gpu_add_boundary_candidates: bool = True,
+    gpu_use_warmstart: bool | None = None,
+    gpu_add_boundary_candidates: bool | None = None,
     gpu_step_size_init: float = 0.05,
     gpu_step_size_mid: float = 0.02,
     gpu_step_size_final: float = 0.005,
@@ -1182,9 +1182,18 @@ def mymain_se(
     elif solver_mode not in {"discrete", "continuous", "continuous2", "gpu_continuous"}:
         raise ValueError("solver_mode must be one of {'gpu', 'discrete', 'continuous', 'continuous2', 'gpu_continuous'}")
 
+    if interp_method is None:
+        # Match MATLAB baseline behavior in gpu_continuous mode unless explicitly overridden.
+        interp_method = "spline" if solver_mode == "gpu_continuous" else "linear"
     interp_method = interp_method.lower()
     if interp_method not in {"linear", "nearest", "cubic", "spline"}:
         raise ValueError("interp_method must be one of {'linear', 'nearest', 'cubic', 'spline'}")
+    if gpu_use_warmstart is None:
+        # Warmstart can make path comparisons against MATLAB baseline harder.
+        gpu_use_warmstart = solver_mode != "gpu_continuous"
+    if gpu_add_boundary_candidates is None:
+        # Keep gpu_continuous defaults closer to the plain optimizer path for debugging parity.
+        gpu_add_boundary_candidates = solver_mode != "gpu_continuous"
     # GPU-continuous JAX interpolation path is guaranteed for linear/nearest;
     # gracefully downgrade cubic/spline to linear to avoid backend mismatch.
     gpu_interp_method = interp_method
