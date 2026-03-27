@@ -225,7 +225,8 @@ def _my_auxv_cal_np(
     stock_ret = gret_sh[:, 0]
     weights = gret_sh[:, 2]
 
-    housing_nn = np.clip(myh * house_gross / p.gyp, p.house_min, p.house_max)
+    # Match MATLAB/my_auxv_cal_jit hard bounds used in policy recursion
+    housing_nn = np.clip(myh * house_gross / p.gyp, 0.25, 19.9)
     adjust_house = not np.isclose(myh, thehouse, atol=p.eq_atol, rtol=0.0)
     participate = mya > 0.0
 
@@ -242,7 +243,8 @@ def _my_auxv_cal_np(
         sav = thecash + thehouse * (-p.ppt) - myc
         cash_nn = np.full_like(stock_ret, sav * p.r / p.gyp + p.income)
 
-    cash_nn = np.clip(cash_nn, p.cash_min, p.cash_max)
+    # Match MATLAB/my_auxv_cal_jit hard bounds used in policy recursion
+    cash_nn = np.clip(cash_nn, 0.25, 19.9)
     int_v = model_fn_np(housing_nn, cash_nn)
     eps = 1e-8
     int_v = np.where(np.isfinite(int_v), int_v, eps)
