@@ -18,6 +18,7 @@ jax.config.update('jax_enable_x64',True)
 from fmincon import fmincon
 from my_auxv_cal import AuxVParams, my_auxv_cal, _my_auxv_cal_jit
 from tauchen_hussey import tauchen_hussey
+from interp2 import interp2_regular, interp2_bicubic
 
 # Enable persistent JAX compilation cache to reduce warm-up overhead across runs.
 jax.config.update("jax_compilation_cache_dir", "./jax_cache")
@@ -167,8 +168,163 @@ def _build_model_fn(v_next: jnp.ndarray, gcash: jnp.ndarray, ghouse: jnp.ndarray
     return model_fn
 
 
+######### debug-begin ##########
+def _interp_debug(v_next, housing_q, cash_q, interp_method_code, ghouse, gcash):
+    code = int(interp_method_code)
+    if code == 0:
+        return interp2_regular(ghouse, gcash, v_next, housing_q, cash_q, method="linear", bounds="clip")
+    elif code == 1:
+        return interp2_regular(ghouse, gcash, v_next, housing_q, cash_q, method="nearest", bounds="clip")
+    elif code == 2:
+        return interp2_bicubic(ghouse, gcash, v_next, housing_q, cash_q)
+    else:
+        return interp2_regular(ghouse, gcash, v_next, housing_q, cash_q, method="spline", bounds="clip")
+
+def _debug_fixed_buy_candidate(
+    aux_local,
+    flat_idx,
+    c,
+    a,
+    h,
+    label,
+    cash_flat,
+    house_flat,
+    interp_method_code,
+    ghouse,
+    gcash,
+):
+    c = jnp.asarray(c, dtype=jnp.float64)
+    a = jnp.asarray(a, dtype=jnp.float64)
+    h = jnp.asarray(h, dtype=jnp.float64)
+
+    stock_ret = aux_local.gret_sh[:, 0]
+    house_gross = aux_local.gret_sh[:, 1]
+    weights = aux_local.gret_sh[:, 2]
+
+    u = (1.0 - aux_local.delta) * (c ** aux_local.psi_1)
+
+    adjust_house = jnp.logical_not(jnp.isclose(h, house_flat[flat_idx], atol=aux_local.eq_atol, rtol=0.0))
+    participate = a > 0.0
+
+    if adjust_house and participate:
+        sav = (
+            cash_flat[flat_idx]
+            + house_flat[flat_idx] * (1.0 - aux_local.adjcost - aux_local.ppt)
+            - c - h - aux_local.ppcost - aux_local.otcost
+        )
+        cash_nn = (sav * (1.0 - a) * aux_local.r + sav * a * stock_ret) / aux_local.gyp + aux_local.income
+        branch = "dispose+stock"
+    elif adjust_house and (not participate):
+        sav = (
+            cash_flat[flat_idx]
+            + house_flat[flat_idx] * (1.0 - aux_local.adjcost - aux_local.ppt)
+            - c - h
+        )
+        cash_nn = jnp.full_like(stock_ret, sav * aux_local.r / aux_local.gyp + aux_local.income)
+        branch = "dispose+nostock"
+    elif (not adjust_house) and participate:
+        sav = (
+            cash_flat[flat_idx]
+            + house_flat[flat_idx] * (-aux_local.ppt)
+            - c - aux_local.ppcost - aux_local.otcost
+        )
+        cash_nn = (sav * (1.0 - a) * aux_local.r + sav * a * stock_ret) / aux_local.gyp + aux_local.income
+        branch = "keep+stock"
+    else:
+        sav = cash_flat[flat_idx] + house_flat[flat_idx] * (-aux_local.ppt) - c
+        cash_nn = jnp.full_like(stock_ret, sav * aux_local.r / aux_local.gyp + aux_local.income)
+        branch = "keep+nostock"
+
+    housing_nn = jnp.clip(h * house_gross / aux_local.gyp, 0.25, 19.9)
+    cash_nn = jnp.clip(cash_nn, 0.25, 19.9)
+
+    int_v = _interp_debug(aux_local.v_next, housing_nn, cash_nn, interp_method_code, ghouse, gcash)
+    surv = aux_local.survprob[aux_local.t, 0]
+    aux_vv = jnp.sum(weights * (int_v ** (1.0 - aux_local.rho))) * surv
+    v_like = (u + aux_local.delta * (aux_vv ** (1.0 / aux_local.theta))) ** aux_local.psi_2
+
+    jax.debug.print(
+        "\n{label}\n"
+        "choice -> C={c:.12f}, A={a:.12f}, H={h:.12f}\n"
+        "branch={branch}, V_like={vv:.12f}\n"
+        "sav={sav:.12f}, auxVV={aux_vv:.12f}\n"
+        "cash_nn    min/max=[{cmin:.12f}, {cmax:.12f}]\n"
+        "housing_nn min/max=[{hmin:.12f}, {hmax:.12f}]\n"
+        "int_V      min/max=[{vmin:.12f}, {vmax:.12f}]",
+        label=label,
+        c=c, a=a, h=h,
+        branch=branch,
+        vv=v_like,
+        sav=sav,
+        aux_vv=aux_vv,
+        cmin=jnp.min(cash_nn), cmax=jnp.max(cash_nn),
+        hmin=jnp.min(housing_nn), hmax=jnp.max(housing_nn),
+        vmin=jnp.min(int_v), vmax=jnp.max(int_v),
+    )
 
 
+'''
+def _debug_buy_boundary_candidate(
+    aux_local,
+    flat_idx,
+    can_participate,
+    cash_flat,
+    house_flat,
+    interp_method_code,
+    ghouse,
+    gcash,
+    minh2,
+    fp,
+):
+    b = cash_flat[flat_idx] + house_flat[flat_idx] * (1.0 - aux_local.adjcost - aux_local.ppt)
+    if can_participate:
+        b = b - aux_local.otcost - aux_local.ppcost
+        a = jnp.asarray(fp.minalpha, dtype=jnp.float64)
+    else:
+        a = jnp.float64(0.0)
+
+    h = jnp.asarray(minh2, dtype=jnp.float64)
+    c = jnp.maximum(jnp.float64(0.25), b - h)
+
+    x = jnp.array([c, a, h], dtype=jnp.float64)
+
+    house_gross = aux_local.gret_sh[:, 1]
+    weights = aux_local.gret_sh[:, 2]
+
+    u = (1.0 - aux_local.delta) * (c ** aux_local.psi_1)
+    sav = cash_flat[flat_idx] + house_flat[flat_idx] * (1.0 - aux_local.adjcost - aux_local.ppt) - c - h
+    if can_participate:
+        sav = sav - aux_local.otcost - aux_local.ppcost
+
+    housing_nn = jnp.clip(h * house_gross / aux_local.gyp, 0.25, 19.9)
+
+    if can_participate:
+        stock_ret = aux_local.gret_sh[:, 0]
+        cash_nn = (sav * (1.0 - a) * aux_local.r + sav * a * stock_ret) / aux_local.gyp + aux_local.income
+    else:
+        cash_nn = jnp.full_like(house_gross, sav * aux_local.r / aux_local.gyp + aux_local.income)
+
+    cash_nn = jnp.clip(cash_nn, 0.25, 19.9)
+
+    int_v = _interp_debug(aux_local.v_next, housing_nn, cash_nn, interp_method_code, ghouse, gcash)
+    surv = aux_local.survprob[aux_local.t, 0]
+    aux_vv = jnp.sum(weights * (int_v ** (1.0 - aux_local.rho))) * surv
+
+    jax.debug.print(
+        "\nBUY BOUNDARY CANDIDATE\n"
+        "C={c:.12f}, A={a:.12f}, H={h:.12f}\n"
+        "sav={sav:.12f}, auxVV={aux_vv:.12f}\n"
+        "cash_nn min/max=[{cmin:.12f}, {cmax:.12f}]\n"
+        "housing_nn min/max=[{hmin:.12f}, {hmax:.12f}]\n"
+        "int_V min/max=[{vmin:.12f}, {vmax:.12f}]",
+        c=c, a=a, h=h, sav=sav, aux_vv=aux_vv,
+        cmin=jnp.min(cash_nn), cmax=jnp.max(cash_nn),
+        hmin=jnp.min(housing_nn), hmax=jnp.max(housing_nn),
+        vmin=jnp.min(int_v), vmax=jnp.max(int_v),
+    )
+
+######### debug-end ##########
+'''
 def _build_model_fn_linear_np(v_next_np: np.ndarray, gcash_np: np.ndarray, ghouse_np: np.ndarray, method: str = "linear") -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
     """Build a regular-grid linear/nearest interpolator for NumPy paths."""
     rgi = RegularGridInterpolator(
@@ -225,7 +381,7 @@ def _my_auxv_cal_np(
     stock_ret = gret_sh[:, 0]
     weights = gret_sh[:, 2]
 
-    housing_nn = np.clip(myh * house_gross / p.gyp, p.house_min, p.house_max)
+    housing_nn = np.clip(myh * house_gross / p.gyp, 0.25, 19.9)
     adjust_house = not np.isclose(myh, thehouse, atol=p.eq_atol, rtol=0.0)
     participate = mya > 0.0
 
@@ -242,7 +398,7 @@ def _my_auxv_cal_np(
         sav = thecash + thehouse * (-p.ppt) - myc
         cash_nn = np.full_like(stock_ret, sav * p.r / p.gyp + p.income)
 
-    cash_nn = np.clip(cash_nn, p.cash_min, p.cash_max)
+    cash_nn = np.clip(cash_nn, 0.25, 19.9)
     int_v = model_fn_np(housing_nn, cash_nn)
     eps = 1e-8
     int_v = np.where(np.isfinite(int_v), int_v, eps)
@@ -770,58 +926,117 @@ def _build_gpu_multistart_init(
     n_starts: int,
     warm_x: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    if can_participate:
-        c_candidates = [
-            c_lb,
-            jnp.clip(0.35 * b_vec, c_lb, c_ub),
-            jnp.clip(0.50 * b_vec, c_lb, c_ub),
-            jnp.clip(0.65 * b_vec, c_lb, c_ub),
-            jnp.clip(0.80 * b_vec, c_lb, c_ub),
-            c_ub,
-        ]
-    
-        a_candidates = [
-            jnp.full_like(b_vec, 0.01),
-            jnp.full_like(b_vec, 0.03),
-            jnp.full_like(b_vec, 0.05),
-            jnp.full_like(b_vec, 0.08),
-            jnp.full_like(b_vec, 0.12),
-            jnp.full_like(b_vec, 0.20),
-        ]
-        a_candidates = [jnp.clip(a0, a_lb, a_ub) for a0 in a_candidates]
+    if h_mode == "keep":
+        if can_participate:
+            c_candidates = [
+                c_lb,
+                jnp.clip(0.35 * b_vec, c_lb, c_ub),
+                jnp.clip(0.50 * b_vec, c_lb, c_ub),
+                jnp.clip(0.65 * b_vec, c_lb, c_ub),
+                jnp.clip(0.80 * b_vec, c_lb, c_ub),
+                c_ub,
+            ]
+            a_candidates = [
+               jnp.full_like(b_vec, 0.01),
+               jnp.full_like(b_vec, 0.03),
+               jnp.full_like(b_vec, 0.05),
+               jnp.full_like(b_vec, 0.08),
+               jnp.full_like(b_vec, 0.12), 
+               jnp.full_like(b_vec, 0.20),
+            ]
+            a_candidates = [jnp.clip(a0, a_lb, a_ub) for a0 in a_candidates]
+            h_candidates = [h_lb] * 6
+        else:
+            c_candidates = [
+               c_lb,
+               jnp.clip(0.50 * b_vec, c_lb, c_ub),
+               jnp.clip(0.75 * b_vec, c_lb, c_ub),
+               c_ub,
+            ]
+            a_candidates = [jnp.zeros_like(b_vec)] * 4
+            h_candidates = [h_lb] * 4
+       
+    elif h_mode == "zero":
+        if can_participate:
+            c_candidates = [
+                c_lb,
+                jnp.clip(0.35 * b_vec, c_lb, c_ub),
+                jnp.clip(0.50 * b_vec, c_lb, c_ub),
+                jnp.clip(0.65 * b_vec, c_lb, c_ub),
+                jnp.clip(0.80 * b_vec, c_lb, c_ub),
+                c_ub,
+            ]
+            a_candidates = [
+                jnp.full_like(b_vec, 0.01),
+                jnp.full_like(b_vec, 0.03),
+                jnp.full_like(b_vec, 0.05),
+                jnp.full_like(b_vec, 0.08),
+                jnp.full_like(b_vec, 0.12),
+                jnp.full_like(b_vec, 0.20),
+            ]
+            a_candidates = [jnp.clip(a0, a_lb, a_ub) for a0 in a_candidates]
+            h_candidates = [jnp.zeros_like(b_vec)] * 6
+        else:
+            c_candidates = [
+                c_lb,
+                jnp.clip(0.50 * b_vec, c_lb, c_ub),
+                jnp.clip(0.75 * b_vec, c_lb, c_ub),
+                c_ub,
+            ]
+            a_candidates = [jnp.zeros_like(b_vec)] * 4
+            h_candidates = [jnp.zeros_like(b_vec)] * 4
     
     else:
-        c_candidates = [
-            c_lb,
-            jnp.clip(0.50 * b_vec, c_lb, c_ub),
-            c_ub,
-        ]
+        min_h = h_lb 
+            
+        if can_participate:
+            c_candidates = [
+                jnp.clip(b_vec - min_h - 20.0, c_lb, c_ub),
+                jnp.clip(b_vec - min_h - 16.0, c_lb, c_ub),
+                jnp.clip(0.50 * b_vec, c_lb, c_ub),
+                jnp.clip(0.65 * b_vec, c_lb, c_ub),
+                jnp.clip(0.80 * b_vec, c_lb, c_ub),
+                c_lb,
+            ]
+            a_candidates = [
+                jnp.full_like(b_vec, 0.01),
+                jnp.full_like(b_vec, 0.03),
+                jnp.full_like(b_vec, 0.05),
+                jnp.full_like(b_vec, 0.08),
+                jnp.full_like(b_vec, 0.12),
+                jnp.full_like(b_vec, 0.20),
+            ]
+            a_candidates = [jnp.clip(a0, a_lb, a_ub) for a0 in a_candidates]
+            h_candidates = [
+                min_h,                                  # 贴低-H边界
+                min_h,                                  # 再给一个低-H起点
+                jnp.clip(0.25 * b_vec, h_lb, h_ub),
+                jnp.clip(0.50 * b_vec, h_lb, h_ub),
+                jnp.clip(0.75 * b_vec, h_lb, h_ub),
+                h_ub,
+            ]
+        else:
+                # 关键：no-stock + buy 以前只有3个起点，还被 zip 截断
+            c_candidates = [
+                jnp.clip(b_vec - min_h - 20.0, c_lb, c_ub),
+                jnp.clip(b_vec - min_h - 16.0, c_lb, c_ub),
+                jnp.clip(0.50 * b_vec, c_lb, c_ub),
+                jnp.clip(0.65 * b_vec, c_lb, c_ub),
+                jnp.clip(0.80 * b_vec, c_lb, c_ub),
+                c_lb,
+            ]
+            a_candidates = [jnp.zeros_like(b_vec)] * 6
+            h_candidates = [
+                min_h,                                  # 贴低-H边界
+                min_h,                                  # 再给一个低-H起点
+                jnp.clip(0.25 * b_vec, h_lb, h_ub),
+                jnp.clip(0.50 * b_vec, h_lb, h_ub),
+                jnp.clip(0.75 * b_vec, h_lb, h_ub),
+                h_ub,
+            ]
     
-        a_candidates = [jnp.zeros_like(b_vec)] * 3
-
-    if h_mode == "keep":
-    # keep case 的 h 就应该贴当前房屋水平，不要再用 h_lb
-        h_candidates = [
-            h_lb,  # 这里后面传进来的 h_lb 要改成 thehouse_vec
-            h_lb,
-            h_lb,
-            h_lb,
-            h_lb,
-            h_lb,
-        ]
-    elif h_mode == "zero":
-        h_candidates = [jnp.zeros_like(b_vec)] * 6
-    else:  # buy
-        h_candidates = [
-            h_lb,                                      # minhouse2
-            jnp.clip(0.25 * b_vec, h_lb, h_ub),
-            jnp.clip(0.50 * b_vec, h_lb, h_ub),
-            jnp.clip(0.75 * b_vec, h_lb, h_ub),
-            jnp.clip(0.90 * b_vec, h_lb, h_ub),
-            h_ub,
-        ]
-
     x_list = [jnp.stack([c0, a0, h0], axis=1) for c0, a0, h0 in zip(c_candidates, a_candidates, h_candidates)]
+    
     if warm_x is not None:
         xw = jnp.stack(
             [
@@ -832,10 +1047,9 @@ def _build_gpu_multistart_init(
             axis=1,
         )
         x_list.append(xw)
-    x0 = jnp.stack(x_list, axis=0)
+        x0 = jnp.stack(x_list, axis=0)
     return x0[: max(1, int(n_starts))]
-
-
+    
 @jax.jit
 def _gpu_cont_batch_optimize_v2(
     x0_pool: jnp.ndarray,
@@ -1128,6 +1342,61 @@ def _solve_one_state_discrete(
     return out[0], out[1], out[2], out[3]
 
 
+
+def _debug_dispose_nostock_case(
+    x_row,
+    aux_local,
+    flat_idx,
+    label,
+    cash_flat,
+    house_flat,
+    interp_method_code,
+    ghouse,
+    gcash,
+):
+    c = x_row[0]
+    a = x_row[1]
+    h = x_row[2]
+    v = x_row[3]
+
+    house_gross = aux_local.gret_sh[:, 1]
+    weights = aux_local.gret_sh[:, 2]
+
+    u = (1.0 - aux_local.delta) * (c ** aux_local.psi_1)
+
+    sav = (
+        cash_flat[flat_idx]
+        + house_flat[flat_idx] * (1.0 - aux_local.adjcost - aux_local.ppt)
+        - c
+        - h
+    )
+
+    housing_nn = jnp.clip(h * house_gross / aux_local.gyp, 0.25, 19.9)
+    cash_scalar = sav * aux_local.r / aux_local.gyp + aux_local.income
+    cash_nn = jnp.full_like(house_gross, cash_scalar)
+    cash_nn = jnp.clip(cash_nn, 0.25, 19.9)
+    
+    int_v = _interp_debug(aux_local.v_next, housing_nn, cash_nn, interp_method_code, ghouse, gcash)
+    surv = aux_local.survprob[aux_local.t, 0]
+    aux_vv = jnp.sum(weights * (int_v ** (1.0 - aux_local.rho))) * surv
+
+    jax.debug.print(
+        "\n{label}\n"
+        "choice -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}\n"
+        "u = {u:.12f}, sav = {sav:.12f}, auxVV = {aux_vv:.12f}\n"
+        "cash_nn    min/max = [{cmin:.12f}, {cmax:.12f}]\n"
+        "housing_nn min/max = [{hmin:.12f}, {hmax:.12f}]\n"
+        "int_V      min/max = [{vmin:.12f}, {vmax:.12f}]",
+        label=label,
+        c=c, a=a, h=h, v=v,
+        u=u, sav=sav, aux_vv=aux_vv,
+        cmin=jnp.min(cash_nn), cmax=jnp.max(cash_nn),
+        hmin=jnp.min(housing_nn), hmax=jnp.max(housing_nn),
+        vmin=jnp.min(int_v), vmax=jnp.max(int_v),
+    )
+
+
+
 def mymain_se(
     ppt: float,
     ppcost_in: float,
@@ -1156,7 +1425,7 @@ def mymain_se(
     gpu_stage2_frac: float = 0.4,
     gpu_stage3_frac: float = 0.2,
     gpu_refine_steps: int = 20,
-    gpu_case_gap_tol: float = 1e-3,
+    gpu_case_gap_tol: float = 1e-8,
     gpu_enable_scan_backward: bool = False,
     gcash_override: np.ndarray | jnp.ndarray | None = None,
     ghouse_override: np.ndarray | jnp.ndarray | None = None,
@@ -1231,7 +1500,24 @@ def mymain_se(
     A1 = A1.at[:, :, tn - 1].set(A[:, :, tn - 1])
     H1 = H1.at[:, :, tn - 1].set(H[:, :, tn - 1])
     V1 = V1.at[:, :, tn - 1].set(V[:, :, tn - 1])
-
+    term_c = np.asarray(C[:, :, tn - 1])
+    term_v = np.asarray(V[:, :, tn - 1])
+    term_kappa = float((1.0 - delta) ** (psi / (psi - 1.0)))
+    
+    savemat(
+        "debug_terminal_python.mat",
+        {
+            "gcash": np.asarray(gcash),
+            "ghouse": np.asarray(ghouse),
+            "adjcost": float(fp.adjcost),
+            "ppt": float(ppt),
+            "delta": float(delta),
+            "psi": float(psi),
+            "term_c": term_c,
+            "term_v": term_v,
+            "term_kappa": term_kappa,
+        },
+    )
     def _build_convergence_diag(v_arr: np.ndarray, v1_arr: np.ndarray) -> dict[str, np.ndarray | float]:
         """Build simple value-function convergence diagnostics across ages."""
         if v_arr.shape[-1] <= 1:
@@ -1485,12 +1771,16 @@ def mymain_se(
             h_lb = jnp.zeros_like(thecash_vec)
             h_ub = jnp.zeros_like(thecash_vec)
         else:  # buy
-            h_lb = jnp.full_like(thecash_vec, minhouse2)
+            h_lb = jnp.full_like(thecash_vec, jnp.asarray(minh2, dtype=jnp.float64))
             h_ub = jnp.minimum(
-                jnp.full_like(thecash_vec, aux.house_max),
-                jnp.maximum(jnp.full_like(thecash_vec, minhouse2), b_vec - c_lb),
+                jnp.full_like(thecash_vec, jnp.asarray(aux_params.house_max, dtype=jnp.float64)),
+                jnp.maximum(jnp.full_like(thecash_vec, jnp.asarray(minh2, dtype=jnp.float64)), b_vec - c_lb),
             )
-
+        if h_mode == "buy":
+            feasible_case = b_vec >= (jnp.asarray(minh2, dtype=jnp.float64) + jnp.float64(0.25))
+        else:
+            feasible_case = b_vec >= jnp.float64(0.25)
+            
         lb = jnp.stack([c_lb, a_lb, h_lb], axis=1)
         ub = jnp.stack([c_ub, a_ub, h_ub], axis=1)
         x0_pool = _build_gpu_multistart_init(
@@ -1501,7 +1791,58 @@ def mymain_se(
             n_starts=int(gpu_n_starts),
             warm_x=warm_x if gpu_use_warmstart else None,
         )
+ ################  debug-begin ################## 
+        '''
+        if h_mode == "buy":
+            flat_idx_dbg = 20 * gcfg.nh + 10
+            _debug_buy_boundary_candidate(
+                aux_params,
+                flat_idx_dbg,
+                can_participate,
+                thecash_vec,
+                thehouse_vec,
+                interp_method_code,
+                ghouse,
+                gcash,
+                minh2,
+                fp,
+            )
+           
+        if h_mode == "buy":
+            flat_idx_dbg = 20 * gcfg.nh + 10
 
+            jax.debug.print(
+                "\n===== BUY CASE FEASIBLE SET DEBUG =====\n"
+                "state: cash={cash:.12f}, house={house:.12f}\n"
+                "b={b:.12f}, feasible={feas}\n"
+                "c_lb={clb:.12f}, c_ub={cub:.12f}\n"
+                "a_lb={alb:.12f}, a_ub={aub:.12f}\n"
+                "h_lb={hlb:.12f}, h_ub={hub:.12f}",
+                cash=thecash_vec[flat_idx_dbg],
+                house=thehouse_vec[flat_idx_dbg],
+                b=b_vec[flat_idx_dbg],
+                feas=feasible_case[flat_idx_dbg],
+                clb=c_lb[flat_idx_dbg],
+                cub=c_ub[flat_idx_dbg],
+                alb=a_lb[flat_idx_dbg],
+                aub=a_ub[flat_idx_dbg],
+                hlb=h_lb[flat_idx_dbg],
+                hub=h_ub[flat_idx_dbg],
+            )
+        if h_mode == "buy":
+            flat_idx_dbg = 20 * gcfg.nh + 10
+            x0_dbg = x0_pool[:, flat_idx_dbg, :]   # (n_start, 3)
+        
+            for k in range(x0_dbg.shape[0]):
+                jax.debug.print(
+                    "x0[{k}] -> C={c:.12f}, A={a:.12f}, H={h:.12f}",
+                    k=k,
+                    c=x0_dbg[k, 0],
+                    a=x0_dbg[k, 1],
+                    h=x0_dbg[k, 2],
+                )
+        '''
+################  debug-end ##################
         buy_or_zero = (h_mode != "keep")
         aux_args = (
             jnp.asarray(aux_params.t, dtype=jnp.int64),
@@ -1554,10 +1895,99 @@ def mymain_se(
             )
             improve = refined[:, 3] > (best[:, 3] + float(gpu_case_gap_tol))
             best = jnp.where(improve[:, None], refined, best)
+        
+        min_c = jnp.float64(0.25)
+        min_h = jnp.asarray(minh2, dtype=jnp.float64)
+        if h_mode == "buy":
+            feasible_case = b_vec >= (min_c + min_h)
+            h_bad = jnp.full_like(b_vec, min_h)
+        elif h_mode == "zero":
+            feasible_case = b_vec >= min_c
+            h_bad = jnp.zeros_like(b_vec)
+        else:  # keep
+            feasible_case = b_vec >= min_c
+            h_bad = thehouse_vec
+        
+        bad_case = jnp.column_stack([
+            jnp.full_like(b_vec, min_c),          # dummy c
+            jnp.zeros_like(b_vec),                # dummy a
+                h_bad,                                # dummy h
+                jnp.full_like(b_vec, -jnp.inf),       # never selected by argmax
+            ])
+        
+        best = jnp.where(feasible_case[:, None], best, bad_case)
+
+         ##### also debug #####
+        '''
+        if h_mode == "buy":
+            flat_idx_dbg = 20 * gcfg.nh + 10
+            best_dbg = best[flat_idx_dbg]
+        
+            budget_resid = b_vec[flat_idx_dbg] - (best_dbg[0] + best_dbg[2])
+        
+            jax.debug.print(
+                "\n===== BUY CASE BEST DEBUG =====\n"
+                "best -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}\n"
+                "budget residual b-(c+h) = {res:.12f}",
+                c=best_dbg[0],
+                a=best_dbg[1],
+                h=best_dbg[2],
+                v=best_dbg[3],
+                res=budget_resid,
+            )
+            if h_mode == "buy":
+                flat_idx_dbg = 20 * gcfg.nh + 10
+
+                # A: Python 当前 best
+                _debug_fixed_buy_candidate(
+                    aux_params,
+                    flat_idx_dbg,
+                    best_dbg[0],
+                    best_dbg[1],
+                    best_dbg[2],
+                    "BUY FIXED CANDIDATE A: python best",
+                    thecash_vec,
+                    thehouse_vec,
+                    interp_method_code,
+                    ghouse,
+                    gcash,
+                )
+            
+                # B1: MATLAB low-H, no-stock
+                _debug_fixed_buy_candidate(
+                    aux_params,
+                    flat_idx_dbg,
+                    jnp.float64(57.946756011683),
+                    jnp.float64(0.0),
+                    jnp.float64(0.0),
+                    "BUY FIXED CANDIDATE B1: MATLAB low-H nostock",
+                    thecash_vec,
+                    thehouse_vec,
+                    interp_method_code,
+                    ghouse,
+                    gcash,
+                )
+            
+                # B2: MATLAB low-H, stock
+                _debug_fixed_buy_candidate(
+                    aux_params,
+                    flat_idx_dbg,
+                    jnp.float64(56.871885785475),
+                    jnp.float64(0.010001814809),
+                    jnp.float64(0.0),
+                    "BUY FIXED CANDIDATE B2: MATLAB low-H stock",
+                    thecash_vec,
+                    thehouse_vec,
+                    interp_method_code,
+                    ghouse,
+                    gcash,
+                )
+        '''
+        ########## debug end ############
         if gpu_add_boundary_candidates:
             best = _add_boundary_candidates(best, lb, ub, b_vec, buy_or_zero, thecash_vec, thehouse_vec, aux_args, interp_method_code)
         return best
-
+       
     def _solve_cont_case(
         c: float,
         h: float,
@@ -1743,9 +2173,9 @@ def mymain_se(
                     _solve_case_batch_gpu_cont(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c, interp_method_code=interp_method_code),
                     _solve_case_batch_gpu_cont(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc, interp_method_code=interp_method_code),
                     _solve_case_batch_gpu_cont(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c, interp_method_code=interp_method_code),
-                    _solve_case_batch_gpu_cont(aux_nopay, ppcost, 0.0, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c, interp_method_code=interp_method_code),
-                    _solve_case_batch_gpu_cont(aux_nopay, ppcost, 0.0, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c, interp_method_code=interp_method_code),
-                    _solve_case_batch_gpu_cont(aux_nopay, ppcost, 0.0, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c, interp_method_code=interp_method_code),
+                    _solve_case_batch_gpu_cont(aux_nopay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c, interp_method_code=interp_method_code),
+                    _solve_case_batch_gpu_cont(aux_nopay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c, interp_method_code=interp_method_code),
+                    _solve_case_batch_gpu_cont(aux_nopay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c, interp_method_code=interp_method_code),
                 ],
                 axis=0,
             )
@@ -1815,6 +2245,10 @@ def mymain_se(
 
     # Loop 1: 已经支付过 one-time cost 的人群（批量化 state 维度）
     income1, gyp1, ppc_path1, otc_path1, minh2_path1 = _precompute_backward_paths(float(ppcost_in), 0.0)
+    print("\n" + "="*50)
+    print(f"CRITICAL: Initial V at T (index {tn-1}) check:")
+    print(f"Max: {jnp.max(V[:, :, tn-1]):.2f}, Min: {jnp.min(V[:, :, tn-1]):.2f}")
+    print("="*50 + "\n")
     for t in range(tn - 2, -1, -1):
         aux, model_fn_np, minhouse2 = loop_block(
             V[:, :, t + 1], t,
@@ -1918,12 +2352,13 @@ def mymain_se(
             )
             # ===== DEBUG: real batch-v2 6-case candidate table at T-1 =====
             if t == tn - 2:   # Python 的 T-1
+                print(f"DEBUG T-1 Params: income={income1[t]:.4f}, ppcost={ppc_path1[t]:.4f}, otcost={otc_path1[t]:.4f}")
                 debug_points = [
                     (20, 10),
-                    (19, 10),
                     (20, 9),
-                    (18, 10),
+                    (19, 10),
                     (19, 9),
+                    (18, 10),
                 ]
                 case_names = [
                     "buy+stock",
@@ -2061,6 +2496,8 @@ def mymain_se(
                 best_flat[k, :] = np.asarray(pay_best if pay_best[3] >= nopay_best[3] else nopay_best, dtype=float)
             best_np = best_flat.reshape(gcfg.ncash, gcfg.nh, 4)
         elif solver_mode == "gpu_continuous":
+            
+              
             warm_pay_buy_stock = warm_pay_zero_stock = warm_pay_buy_nostock = None
             warm_pay_zero_nostock = warm_pay_keep_stock = warm_pay_keep_nostock = None
         
@@ -2139,7 +2576,7 @@ def mymain_se(
                         warm_x=warm_pay_keep_nostock,
                     ),
                     _solve_case_batch_gpu_cont_v2(
-                        aux_nopay, ppcost, 0.0, minhouse2,
+                        aux_nopay, ppcost, otcost, minhouse2,
                         h_mode="buy",
                         can_participate=False,
                         budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c,
@@ -2147,7 +2584,7 @@ def mymain_se(
                         warm_x=warm_nopay_buy_nostock,
                     ),
                     _solve_case_batch_gpu_cont_v2(
-                        aux_nopay, ppcost, 0.0, minhouse2,
+                        aux_nopay, ppcost, otcost, minhouse2,
                         h_mode="zero",
                         can_participate=False,
                         budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c,
@@ -2155,7 +2592,7 @@ def mymain_se(
                         warm_x=warm_nopay_zero_nostock,
                     ),
                     _solve_case_batch_gpu_cont_v2(
-                        aux_nopay, ppcost, 0.0, minhouse2,
+                        aux_nopay, ppcost, otcost, minhouse2,
                         h_mode="keep",
                         can_participate=False,
                         budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c,
@@ -2165,83 +2602,277 @@ def mymain_se(
                 ],
                 axis=0,
             )
-            if t == tn - 2:   # Python 的 T-1
+            
+            if t == tn - 2:
+                flat_idx = 20 * gcfg.nh + 10   # Python 0-based -> MATLAB (21,11)
+                one_state = all_stack[:, flat_idx, :]
+            
+                jax.debug.print(
+                    "\n===== REAL scan main-path + components: V1 at T-1, state (cash_idx=21, house_idx=11) ====="
+                )
+                jax.debug.print(
+                    "state: cash={cash:.12f}, house={house:.12f}, t={t}",
+                    cash=cash_flat[flat_idx],
+                    house=house_flat[flat_idx],
+                    t=t,
+                )
+            
+                _debug_dispose_nostock_case(
+                    one_state[2], aux_pay, flat_idx, "case3  pay_buy_nostock",
+                    cash_flat, house_flat, interp_method_code, ghouse, gcash
+                )
+                _debug_dispose_nostock_case(
+                    one_state[3], aux_pay, flat_idx, "case4  pay_zero_nostock",
+                    cash_flat, house_flat, interp_method_code, ghouse, gcash
+                )
+                _debug_dispose_nostock_case(
+                    one_state[6], aux_nopay, flat_idx, "case7  nopay_buy_nostock",
+                    cash_flat, house_flat, interp_method_code, ghouse, gcash
+                )
+                _debug_dispose_nostock_case(
+                    one_state[7], aux_nopay, flat_idx, "case8  nopay_zero_nostock",
+                    cash_flat, house_flat, interp_method_code, ghouse, gcash
+                )
+                
+            if t == tn - 2:
+                ci, hi = 20, 10          # Python 0-based -> MATLAB (21,11)
+                flat_idx = ci * gcfg.nh + hi
+                one_state = all_stack[:, flat_idx, :]   # (9, 4) = [C, A, H, V]
+            
+                jax.debug.print(
+                    "\n===== REAL scan main-path: V1 at T-1, state (cash_idx=21, house_idx=11) ====="
+                )
+                jax.debug.print(
+                    "state: cash={cash:.12f}, house={house:.12f}, t={t}",
+                    cash=cash_flat[flat_idx],
+                    house=house_flat[flat_idx],
+                    t=t,
+                )
+            
+                jax.debug.print(
+                    "case1  pay_buy_stock              -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[0, 0], a=one_state[0, 1], h=one_state[0, 2], v=one_state[0, 3]
+                )
+                jax.debug.print(
+                    "case2  pay_zero_stock             -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[1, 0], a=one_state[1, 1], h=one_state[1, 2], v=one_state[1, 3]
+                )
+                jax.debug.print(
+                    "case3  pay_buy_nostock            -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[2, 0], a=one_state[2, 1], h=one_state[2, 2], v=one_state[2, 3]
+                )
+                jax.debug.print(
+                    "case4  pay_zero_nostock           -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[3, 0], a=one_state[3, 1], h=one_state[3, 2], v=one_state[3, 3]
+                )
+                jax.debug.print(
+                    "case5  pay_keep_stock             -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[4, 0], a=one_state[4, 1], h=one_state[4, 2], v=one_state[4, 3]
+                )
+                jax.debug.print(
+                    "case6  pay_keep_nostock           -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[5, 0], a=one_state[5, 1], h=one_state[5, 2], v=one_state[5, 3]
+                )
+                jax.debug.print(
+                    "case7  nopay_buy_nostock          -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[6, 0], a=one_state[6, 1], h=one_state[6, 2], v=one_state[6, 3]
+                )
+                jax.debug.print(
+                    "case8  nopay_zero_nostock         -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[7, 0], a=one_state[7, 1], h=one_state[7, 2], v=one_state[7, 3]
+                )
+                jax.debug.print(
+                    "case9  nopay_keep_nostock         -> C={c:.12f}, A={a:.12f}, H={h:.12f}, V={v:.12f}",
+                    c=one_state[8, 0], a=one_state[8, 1], h=one_state[8, 2], v=one_state[8, 3]
+                )
+            
+                best_idx_local = jnp.argmax(one_state[:, 3])
+                jax.debug.print(
+                    "BEST case = {k}, best V = {v:.12f}",
+                    k=best_idx_local + 1,
+                    v=one_state[best_idx_local, 3],
+                )
+        
+            if t == tn - 2:
                 debug_points = [
                     (20, 10),
-                    (19, 10),
                     (20, 9),
-                    (18, 10),
+                    (19, 10),
                     (19, 9),
+                    (18, 10),
                 ]
                 case_names = [
-                    "buy+stock",
-                    "zero+stock",
-                    "buy+nostock",
-                    "zero+nostock",
-                    "keep+stock",
-                    "keep+nostock",
+                    "buy+stock+pay",
+                    "zero+stock+pay",
+                    "buy+nostock+pay",
+                    "zero+nostock+pay",
+                    "keep+stock+pay",
+                    "keep+nostock+pay",
+                    "buy+nostock+nopay",
+                    "zero+nostock+nopay",
+                    "keep+nostock+nopay",
                 ]
+        
+                cs_np = np.asarray(all_stack)
+                best_idx_dbg = np.argmax(cs_np[:, :, 3], axis=0)
+                
+                def _rhs_fixed_x_jit(x3, cash0, house0, aux_local):
+                    x3 = jnp.asarray(x3, dtype=jnp.float64)
+                    val = _my_auxv_cal_jit(
+                        x3,
+                        float(cash0),
+                        float(house0),
+                        v_next=aux_local.v_next,
+                        gcash_grid=aux_local.gcash_grid,
+                        ghouse_grid=aux_local.ghouse_grid,
+                        t=aux_local.t,
+                        rho=aux_local.rho,
+                        delta=aux_local.delta,
+                        psi_1=aux_local.psi_1,
+                        psi_2=aux_local.psi_2,
+                        theta=aux_local.theta,
+                        gyp=aux_local.gyp,
+                        adjcost=aux_local.adjcost,
+                        ppt=aux_local.ppt,
+                        ppcost=aux_local.ppcost,
+                        otcost=aux_local.otcost,
+                        income=aux_local.income,
+                        survprob=aux_local.survprob,
+                        gret_sh=aux_local.gret_sh,
+                        r=aux_local.r,
+                        cash_min=aux_local.cash_min,
+                        cash_max=aux_local.cash_max,
+                        house_min=aux_local.house_min,
+                        house_max=aux_local.house_max,
+                        eq_atol=aux_local.eq_atol,
+                        interp_method=interp_method,
+                    )
+                    return -float(val)   # my_auxv_cal_jit 返回的是 objective = -V
             
-                cs_np = np.asarray(case_stack)   # shape = (6, n_state, 4)
+                cs_np = np.asarray(all_stack)
                 best_idx_dbg = np.argmax(cs_np[:, :, 3], axis=0)
             
-                print("\n===== REAL batch-v2 loop 2 6-case candidate table at T-1 =====")
+                print("\n===== LOOP2 T-1 fixed-x RHS check =====")
                 for i_py, j_py in debug_points:
                     flat_idx = i_py * gcfg.nh + j_py
                     cash_val = float(gcash[i_py])
                     house_val = float(ghouse[j_py])
             
+                    print(
+                        f"\n--- state: (cash_idx={i_py}, house_idx={j_py}), "
+                        f"cash={cash_val:.6f}, house={house_val:.6f} ---"
+                    )
+            
+                    for k, name in enumerate(case_names):
+                        c_k, a_k, h_k, v_k = cs_np[k, flat_idx, :]
+                        x_k = jnp.array([c_k, a_k, h_k], dtype=jnp.float64)
+            
+                        rhs_pay = _rhs_fixed_x_jit(x_k, cash_val, house_val, aux_pay)
+                        rhs_nopay = _rhs_fixed_x_jit(x_k, cash_val, house_val, aux_nopay)
+            
+                        rhs_case = rhs_pay if k < 6 else rhs_nopay
+            
+                        print(
+                            f"{name:<22s} | "
+                            f"C={float(c_k):.10f}, "
+                            f"A={float(a_k):.10f}, "
+                            f"H={float(h_k):.10f}, "
+                            f"savedV={float(v_k):.10f}, "
+                            f"rhs_pay={rhs_pay:.10f}, "
+                            f"rhs_nopay={rhs_nopay:.10f}, "
+                            f"rhs_case={rhs_case:.10f}, "
+                            f"diff(saved-rhs_case)={float(v_k) - rhs_case:.10f}"
+                        )
+
+                    kbest = int(best_idx_dbg[flat_idx])
+                    cb, ab, hb, vb = cs_np[kbest, flat_idx, :]
+                    x_best = jnp.array([cb, ab, hb], dtype=jnp.float64)
+            
+                    rhs_best_pay = _rhs_fixed_x_jit(x_best, cash_val, house_val, aux_pay)
+                    rhs_best_nopay = _rhs_fixed_x_jit(x_best, cash_val, house_val, aux_nopay)
+                    rhs_best_case = rhs_best_pay if kbest < 6 else rhs_best_nopay
+            
+                    print(
+                        f"BEST = {case_names[kbest]} | "
+                        f"C={float(cb):.10f}, "
+                        f"A={float(ab):.10f}, "
+                        f"H={float(hb):.10f}, "
+                        f"savedV={float(vb):.10f}, "
+                        f"rhs_pay={rhs_best_pay:.10f}, "
+                        f"rhs_nopay={rhs_best_nopay:.10f}, "
+                        f"rhs_case={rhs_best_case:.10f}, "
+                        f"diff(saved-rhs_case)={float(vb) - rhs_best_case:.10f}"
+                    )
+        
+                print("\n===== REAL batch-v2 loop2 9-case candidate table at T-1 =====")
+                for i_py, j_py in debug_points:
+                    flat_idx = i_py * gcfg.nh + j_py
+                    cash_val = float(gcash[i_py])
+                    house_val = float(ghouse[j_py])
+                    
+                    vals = cs_np[:, flat_idx, 3]
+                    print(
+                        "raw V by case =",
+                        [(case_names[k], float(vals[k])) for k in range(len(case_names))]
+                    )
+                    print("unique V count =", np.unique(np.round(vals, 12)).size)
+                    order = np.argsort(vals)[::-1]
+            
                     print(f"\n--- state: (cash_idx={i_py}, house_idx={j_py}), cash={cash_val:.6f}, house={house_val:.6f} ---")
+                    '''
                     for k, name in enumerate(case_names):
                         c_k, a_k, h_k, v_k = cs_np[k, flat_idx, :]
                         print(
-                            f"{name:<14s} -> "
+                            f"{name:<20s} -> "
                             f"C={float(c_k):.10f}, "
                             f"A={float(a_k):.10f}, "
                             f"H={float(h_k):.10f}, "
                             f"V={float(v_k):.10f}"
                         )
-            
                     kbest = int(best_idx_dbg[flat_idx])
                     cb, ab, hb, vb = cs_np[kbest, flat_idx, :]
                     print(
-                        f"BEST = {case_names[kbest]}  |  "
+                        f"BEST = {case_names[kbest]} | "
                         f"C={float(cb):.10f}, "
                         f"A={float(ab):.10f}, "
                         f"H={float(hb):.10f}, "
                         f"V={float(vb):.10f}"
                     )
+                    '''
+                    for rank, k in enumerate(order):
+                        c_k, a_k, h_k, v_k = cs_np[k, flat_idx, :]
+                        print(
+                            f"#{rank+1:>2} {case_names[k]:<22} | "
+                            f"C={float(c_k):.10f}, "
+                            f"A={float(a_k):.10f}, "
+                            f"H={float(h_k):.10f}, "
+                            f"V={float(v_k):.16e}"
+                        )
+
+                    kbest = int(order[0])
+                    k2 = int(order[1])
+                    vbest = float(cs_np[kbest, flat_idx, 3])
+                    v2 = float(cs_np[k2, flat_idx, 3])
+                    print(f"BEST   = {case_names[kbest]} | V={vbest:.16e}")
+                    print(f"SECOND = {case_names[k2]} | V={v2:.16e}")
+                    print(f"GAP(best-second) = {vbest - v2:.16e}")
+                    cb, ab, hb, vb = cs_np[kbest, flat_idx, :]
+                    print(
+                        f"BEST = {case_names[kbest]} | "
+                        f"C={float(cb):.10f}, "
+                        f"A={float(ab):.10f}, "
+                        f"H={float(hb):.10f}, "
+                        f"V={float(vb):.10f}"
+                    )
+            
+                    if len(order) > 1:
+                        k2 = int(order[1])
+                        gap = float(cs_np[kbest, flat_idx, 3] - cs_np[k2, flat_idx, 3])
+                        print(f"GAP(best-second) = {gap:.10f}")
+                    
+        
             best_idx = jnp.argmax(all_stack[:, :, 3], axis=0)
             best = jnp.take_along_axis(all_stack, best_idx[None, :, None], axis=0)[0]
-            best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
-        else:
-            pay_stack = jnp.stack(
-                [
-                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
-                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c - otc - ppc),
-                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=True, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c - otc - ppc),
-                    _solve_case_batch(aux_pay, ppcost, otcost, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
-                ],
-                axis=0,
-            )
-            pay_idx = jnp.argmax(pay_stack[:, :, 3], axis=0)
-            pay_best = jnp.take_along_axis(pay_stack, pay_idx[None, :, None], axis=0)[0]
-
-            nopay_stack = jnp.stack(
-                [
-                    _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="buy", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                    _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="zero", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (1 - fp.adjcost - ppt) + c),
-                    _solve_case_batch(aux_nopay, ppcost, 0.0, minhouse2, h_mode="keep", can_participate=False, budget_fn=lambda c, h, ppc, otc: h * (-ppt) + c),
-                ],
-                axis=0,
-            )
-            nopay_idx = jnp.argmax(nopay_stack[:, :, 3], axis=0)
-            nopay_best = jnp.take_along_axis(nopay_stack, nopay_idx[None, :, None], axis=0)[0]
-
-            use_pay = pay_best[:, 3] >= nopay_best[:, 3]
-            best = jnp.where(use_pay[:, None], pay_best, nopay_best)
             best_np = np.asarray(best).reshape(gcfg.ncash, gcfg.nh, 4)
         C1 = C1.at[:, :, t].set(jnp.asarray(best_np[:, :, 0], dtype=jnp.float64))
         A1 = A1.at[:, :, t].set(jnp.asarray(best_np[:, :, 1], dtype=jnp.float64))
@@ -2274,7 +2905,7 @@ def mymain_se(
             "ghouse": np.asarray(ghouse).reshape(-1, 1),
         })
     if solver_mode == "gpu_continuous":
-        savemat("fresh_jax_value_policy_gpu2.mat", {
+        savemat("fresh_jax_value_policy_gpu_linear.mat", {
             "V": v_np,
             "V1": v1_np,
             "C": c_np,
